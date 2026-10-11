@@ -1,0 +1,38 @@
+[gd_scene load_steps=3 format=3 uid="uid://cp1_brute_0001"]
+
+[ext_resource type="Script" path="res://scenes/enemies/Brute.gd" id="1_brute"]
+
+[sub_resource type="RectangleShape2D" id="rect_b"]
+size = Vector2(12, 12)
+
+; ==== R-146 · 第三种敌人「快速近战型僵尸」====
+; 【与 Zombie.tscn 的差异 —— 只有两处】
+;   ① script -> Brute.gd（继承 Zombie.gd，只覆写速度/伤害/血量三个数值）
+;   ② Sprite 颜色：Color(0.9, 0.35, 0.1, 1) = **橙褐色**
+;      —— 必须与僵尸的 Color(0.85,0.2,0.2,1)「红色」和佣兵的黄绿色**三向可分**：
+;      玩家在 320×180 内分辨率下要在**一瞬间**分辨"这是普通僵尸还是快攻型"，
+;      红色 vs 橙褐是最省力的色相距离；且与当前**僵尸同阵营**，绝不能撞佣兵色。
+;      ⚠ **这只是占位色**：R-145 已定稿的 3/4 侧上视角精灵（zombie/merc PNG）尚未接入，
+;        接入后本行的 Sprite 会被 `Sprite2D.new()` 的程序化精灵整体替换
+;        （Crate.gd 的既有模式，.tscn 不动）。色相区分的意图会迁移到精灵的调色板上。
+;
+; 【刻意不变的】
+;   · collision_layer = 4（亡灵层）：子弹与敌我判定依赖 **layer**，不依赖 mask
+;   · collision_mask = 19：与僵尸同为"被墙/箱子/玩家挡住，但不与其它敌人互撞"（R-93 围攻感）
+;   · 碰撞盒 12×12：需求没说更大，改大会让"能不能挤过去"的判断失效
+;   · 节点名 `Sprite`：父类 `@onready var sprite: Polygon2D = $Sprite` 依赖它
+;   · 节点名 `Muzzle`：父类 `_face()` / 枪口相关逻辑依赖它
+[node name="Brute" type="CharacterBody2D"]
+collision_layer = 4
+collision_mask = 19
+script = ExtResource("1_brute")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("rect_b")
+
+[node name="Sprite" type="Polygon2D" parent="."]
+color = Color(0.9, 0.35, 0.1, 1)
+polygon = PackedVector2Array(-6, -6, 6, -6, 6, 6, -6, 6)
+
+[node name="Muzzle" type="Marker2D" parent="."]
+position = Vector2(8, 0)

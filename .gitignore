@@ -1,0 +1,40 @@
+# ===== Godot 缓存（自动再生）=====
+.godot/
+*.tmp
+
+# ===== 回归 / QA 过程物（不入库）=====
+qa_scratch/
+cp1_dod_log.txt
+dod_*.txt
+*_log.txt
+gen_out.txt
+godot_out.txt
+phase*_log.txt
+
+# ===== 根目录散落备份 =====
+_r*_backup/
+_backups/
+_removed_files/
+
+# ===== 大体积生成物（按需另行管理）=====
+outputs/
+generated-images/
+
+# ===== 编辑器 / OS =====
+*.bak
+*.bak.*
+*.orig
+*~
+.DS_Store
+Thumbs.db
+
+# ===== 凭据 / 密钥（绝不入库）=====
+*.token
+*.secret
+.env
+
+# ===== WorkBuddy 内部记忆（个人工作笔记，不入协作仓库）=====
+.workbuddy/
+
+# ===== 美术预览大图（按需另行管理）=====
+production/previews/

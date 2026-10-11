@@ -1,0 +1,29 @@
+[gd_scene load_steps=3 format=3 uid="uid://cp1_zombie_0001"]
+
+[ext_resource type="Script" path="res://scenes/enemies/Zombie.gd" id="1_zombie"]
+
+[sub_resource type="RectangleShape2D" id="rect_z"]
+size = Vector2(12, 12)
+
+; ==== R-93 敌人互不碰撞（围攻感）====
+; collision_mask = 19 = 31 & ~4 & ~8
+;   原值 31 = 1(墙) + 2(玩家) + 4(亡灵) + 8(雇佣兵) + 16(家具)  ← 全层通吃
+;   去掉 & ~4（僵尸自己这层）→ 不再与其它僵尸物理阻挡
+;   去掉 & ~8（雇佣兵层）    → 僵尸也不再与雇佣兵物理阻挡
+;   保留 1(墙) + 2(玩家) + 16(家具) → 仍被墙/箱子挡住、仍会撞到玩家
+; ⚠ collision_layer 保持 4 不变：子弹/敌我判定（Bullet.gd `collision_mask = 7 if hostile else 13`）
+;   依赖 layer，不依赖本 mask。
+[node name="Zombie" type="CharacterBody2D"]
+collision_layer = 4
+collision_mask = 19
+script = ExtResource("1_zombie")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("rect_z")
+
+[node name="Sprite" type="Polygon2D" parent="."]
+color = Color(0.85, 0.2, 0.2, 1)
+polygon = PackedVector2Array(-6, -6, 6, -6, 6, 6, -6, 6)
+
+[node name="Muzzle" type="Marker2D" parent="."]
+position = Vector2(8, 0)

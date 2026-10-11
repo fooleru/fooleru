@@ -1,0 +1,41 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+
+config/name="Sky Descent CP1"
+config/description="百层逃生 CP1 手感原型：1 张测试房 + 1 把手枪 + 1 种僵尸。验证 G1-G5 手感兜底。"
+run/main_scene="res://scenes/Main.tscn"
+config/features=PackedStringArray("4.7", "GL Compatibility")
+
+[autoload]
+
+GameConstants="*res://scripts/autoload/GameConstants.gd"
+PlaytestLog="*res://scripts/autoload/PlaytestLog.gd"
+Sfx="*res://scripts/autoload/Sfx.gd"
+Loc="*res://scripts/autoload/Loc.gd"
+
+[display]
+
+window/size/viewport_width=320
+window/size/viewport_height=180
+window/size/window_width_override=1280
+window/size/window_height_override=720
+window/stretch/mode="viewport"
+
+[gui]
+
+theme/use_hidpi=true
+
+[rendering]
+
+textures/canvas_textures/default_texture_filter=0
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

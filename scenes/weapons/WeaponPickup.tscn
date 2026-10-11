@@ -1,0 +1,21 @@
+[gd_scene load_steps=3 format=3 uid="uid://cp2_pickup_0001"]
+
+[ext_resource type="Script" path="res://scenes/weapons/WeaponPickup.gd" id="1_pk"]
+
+[sub_resource type="CircleShape2D" id="1_circ"]
+radius = 6.0
+
+[node name="WeaponPickup" type="Area2D"]
+; R-80：碰撞层约定 1=墙 2=玩家 4=亡灵 8=雇佣兵 16=家具。
+;   拾取物只关心**玩家**（layer 2）。⚠ Area2D 的 collision_mask 缺省是 1（=只检测墙），
+;   不显式设成 2 的话它根本看不到玩家 → body_entered 永不触发、地上的补给永远捡不到。
+collision_layer = 0
+collision_mask = 2
+script = ExtResource("1_pk")
+
+[node name="Visual" type="Polygon2D" parent="."]
+	color = Color(0.98, 0.85, 0.2, 1)
+	polygon = PackedVector2Array(-3, -3, 3, -3, 3, 3, -3, 3)
+
+[node name="Col" type="CollisionShape2D" parent="."]
+	shape = SubResource("1_circ")

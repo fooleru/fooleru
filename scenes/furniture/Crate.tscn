@@ -1,0 +1,18 @@
+[gd_scene load_steps=3 format=3 uid="uid://cp2_crate_0001"]
+
+[ext_resource type="Script" path="res://scenes/furniture/Crate.gd" id="1_crate"]
+
+[sub_resource type="RectangleShape2D" id="rect_c"]
+size = Vector2(12, 12)
+
+[node name="Crate" type="StaticBody2D"]
+collision_layer = 16
+collision_mask = 0
+script = ExtResource("1_crate")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+	shape = SubResource("rect_c")
+
+[node name="Sprite" type="Polygon2D" parent="."]
+	color = Color(0.55, 0.42, 0.25, 1)
+	polygon = PackedVector2Array(-6, -6, 6, -6, 6, 6, -6, 6)

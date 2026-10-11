@@ -1,0 +1,22 @@
+[gd_scene load_steps=3 format=3 uid="uid://cp1_player_0001"]
+
+[ext_resource type="Script" path="res://scenes/player/Player.gd" id="1_player"]
+
+[sub_resource type="ConvexPolygonShape2D" id="rect_1"]
+points = PackedVector2Array(6.44, 0, -3.22, 2.59, -3.22, -2.59)
+
+[node name="Player" type="CharacterBody2D"]
+collision_layer = 2
+collision_mask = 17
+motion_mode = 1
+script = ExtResource("1_player")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("rect_1")
+
+[node name="Sprite" type="Polygon2D" parent="."]
+color = Color(0.4, 0.6, 0.95, 1)
+polygon = PackedVector2Array(6.44, 0, -3.22, 2.59, -3.22, -2.59)
+
+[node name="Muzzle" type="Marker2D" parent="."]
+	position = Vector2(8, 0)

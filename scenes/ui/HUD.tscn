@@ -1,0 +1,160 @@
+[gd_scene load_steps=3 format=3 uid="uid://cp1_hud_0001"]
+
+[ext_resource type="Script" path="res://scenes/ui/HUD.gd" id="1_hud"]
+[ext_resource type="Script" path="res://scenes/ui/LoadOverlay.gd" id="2_over"]
+
+[node name="HUD" type="CanvasLayer"]
+process_mode = 1
+layer = 10
+script = ExtResource("1_hud")
+
+; R-74 紧凑化：左上角**只保留楼层文字 + 一组色条**（HP / 体力 / 负重 / 弹匣 / 备弹）。
+; 所有数字文字（HP / 体力 / 负重 / 弹药 / 超重提示）已移除；超重只剩底块颜色 + 斜纹。
+; ⚠ .tscn 的注释用「;」而不是「#」（用 # 会让场景解析失败 → 子节点全部拿不到）。
+[node name="Margin" type="Control" parent="."]
+offset_left = 4.0
+offset_top = 4.0
+offset_right = 316.0
+offset_bottom = 56.0
+mouse_filter = 2
+
+[node name="VBox" type="VBoxContainer" parent="Margin"]
+offset_right = 312.0
+offset_bottom = 52.0
+theme_override_constants/separation = 1
+
+[node name="HP" type="Control" parent="Margin/VBox"]
+custom_minimum_size = Vector2(0, 6)
+
+[node name="HPBlack" type="ColorRect" parent="Margin/VBox/HP"]
+color = Color(0.04, 0.04, 0.05, 1)
+
+[node name="HPRed" type="ColorRect" parent="Margin/VBox/HP"]
+color = Color(0.77, 0.15, 0.15, 1)
+
+[node name="HPGreen" type="ColorRect" parent="Margin/VBox/HP"]
+color = Color(0.24, 0.88, 0.37, 1)
+
+[node name="Stamina" type="Control" parent="Margin/VBox"]
+custom_minimum_size = Vector2(0, 6)
+
+[node name="StaminaTrack" type="ColorRect" parent="Margin/VBox/Stamina"]
+color = Color(0.10, 0.13, 0.18, 1)
+
+[node name="StaminaBar" type="ColorRect" parent="Margin/VBox/Stamina"]
+color = Color(0.37, 0.64, 0.84, 1)
+
+; ==== R-103：体力恢复速度受饥饿/口渴影响的指示器（显示在体力槽**右侧**）====
+; 【为什么用两个 ColorRect 画"+/-"，而不是一个 Label 写"+"】
+;   R-74 起本 HUD 的全部视觉都是 ColorRect 组合（7 条色条 + OverloadBg），唯一例外是楼层号。
+;   ⚠ **实测踩到的坑（不是推想）**：先用 Label 试过一版，font_size = 8 时
+;     Godot 的 Label 会把 size 抬到**字体最小高度 12px**（`get_combined_minimum_size()`），
+;     于是我设的 8px 矩形被撑成 12px → 指示器底边越过 Stamina 行、
+;     **与下一行 Load 行的 OverloadBg 红块（x∈[64,72], y∈[17,25]）真实相交**
+;     （`--verify-staminareg ⑤-c` 实测 `no_overlap_with_overload_bg=false` 抓到的）。
+;     ColorRect 的最小尺寸是 (0,0)，**给多少就是多少** → 几何完全可控。
+;   → 结论：符号用「一横（-）+ 一竖（+）」两片 1px 色块拼，既与既有风格一致，
+;     又把总包围盒锁死在 5×5（正好等于 BAR_H）。
+;
+; 【坐标（相对 Margin/VBox/Stamina 这个 Control 的局部坐标，原点 = 该 Control 左上角）】
+;   色条StaminaBar 占 x ∈ [0, 56]（BAR_W = 56.0，见 HUD.gd）、y ∈ [0, 5]（BAR_H = 5）。
+;   · StaminaRegenH（横笔，永远显示）：x ∈ [58, 63]、y ∈ [2, 3]  → 与色条留 **2px 间隙**
+;   · StaminaRegenV（竖笔，**仅 `+` 时**显示）：x ∈ [60, 61]、y ∈ [0, 5]
+;   → 合并包围盒 = x ∈ [58, 63]、y ∈ [0, 5] = **恰好与色条同高、右侧让出 2px**。
+;   · 换算到屏幕（Margin 位于 (4,4)，Stamina 行顶在 y=11）：指示器 y ∈ [11, 16]，
+;     下一行 Load 顶在 y=18、超重红块 OverloadBg 占 y ∈ [17, 25] → **纵向永不相交**。
+;   · 横向：Load 行的 LoadBar 只到 x = 48.8（BAR_W*0.8），OverloadBg 从 x = 64 起，
+;     而指示器止于 x = 67 且纵向已错开 → 不与任何相邻色块重叠（`--verify-staminareg ⑤-c` 断言）。
+; ⚠ visible = false 是**初始值**：正常态（stamina_regen_state() == 0）必须**完全不显示**。
+;   绝不留空字符串 Label 或 0 尺寸占位 —— 见 HUD.gd 的 R-103 注释。
+[node name="StaminaRegenH" type="ColorRect" parent="Margin/VBox/Stamina"]
+visible = false
+offset_left = 58.0
+offset_top = 2.0
+offset_right = 63.0
+offset_bottom = 3.0
+color = Color(0.24, 0.88, 0.37, 1)
+
+[node name="StaminaRegenV" type="ColorRect" parent="Margin/VBox/Stamina"]
+visible = false
+offset_left = 60.0
+offset_top = 0.0
+offset_right = 61.0
+offset_bottom = 5.0
+color = Color(0.24, 0.88, 0.37, 1)
+
+[node name="Load" type="Control" parent="Margin/VBox"]
+custom_minimum_size = Vector2(0, 6)
+
+[node name="LoadTrack" type="ColorRect" parent="Margin/VBox/Load"]
+color = Color(0.1, 0.11, 0.16, 1)
+
+[node name="LoadBar" type="ColorRect" parent="Margin/VBox/Load"]
+color = Color(0.54, 0.58, 0.62, 1)
+
+[node name="LoadOverflow" type="ColorRect" parent="Margin/VBox/Load"]
+color = Color(0.34, 0.36, 0.44, 1)
+visible = false
+
+[node name="LoadOverlay" type="Control" parent="Margin/VBox/Load"]
+offset_right = 56.0
+offset_bottom = 5.0
+mouse_filter = 2
+script = ExtResource("2_over")
+
+; R-77：饥饿 / 口渴两条常驻色条（身体状态 → 生存状态 → 弹药 → 楼层）
+[node name="Hunger" type="Control" parent="Margin/VBox"]
+custom_minimum_size = Vector2(0, 6)
+
+[node name="HungerTrack" type="ColorRect" parent="Margin/VBox/Hunger"]
+color = Color(0.12, 0.09, 0.06, 1)
+
+[node name="HungerBar" type="ColorRect" parent="Margin/VBox/Hunger"]
+color = Color(0.78, 0.52, 0.22, 1)
+
+[node name="Thirst" type="Control" parent="Margin/VBox"]
+custom_minimum_size = Vector2(0, 6)
+
+[node name="ThirstTrack" type="ColorRect" parent="Margin/VBox/Thirst"]
+color = Color(0.06, 0.10, 0.14, 1)
+
+[node name="ThirstBar" type="ColorRect" parent="Margin/VBox/Thirst"]
+color = Color(0.35, 0.70, 0.90, 1)
+
+[node name="Ammo" type="Control" parent="Margin/VBox"]
+custom_minimum_size = Vector2(0, 6)
+
+[node name="AmmoTrack" type="ColorRect" parent="Margin/VBox/Ammo"]
+color = Color(0.12, 0.11, 0.06, 1)
+
+[node name="AmmoBar" type="ColorRect" parent="Margin/VBox/Ammo"]
+color = Color(0.98, 0.85, 0.2, 1)
+
+[node name="Reserve" type="Control" parent="Margin/VBox"]
+custom_minimum_size = Vector2(0, 4)
+
+[node name="ReserveTrack" type="ColorRect" parent="Margin/VBox/Reserve"]
+color = Color(0.10, 0.10, 0.12, 1)
+
+[node name="ReserveBar" type="ColorRect" parent="Margin/VBox/Reserve"]
+color = Color(0.72, 0.62, 0.28, 1)
+
+[node name="Floor" type="Control" parent="Margin/VBox"]
+custom_minimum_size = Vector2(0, 10)
+
+[node name="FloorLabel" type="Label" parent="Margin/VBox/Floor"]
+offset_left = 0.0
+offset_top = -2.0
+offset_right = 120.0
+offset_bottom = 8.0
+text = "F1"
+theme_override_colors/font_color = Color(0.98, 0.85, 0.2, 1)
+theme_override_font_sizes/font_size = 8
+
+[node name="OverloadBg" type="ColorRect" parent="Margin/VBox/Load"]
+offset_left = 60.0
+offset_top = -1.0
+offset_right = 68.0
+offset_bottom = 7.0
+color = Color(0.95, 0.36, 0.33, 1)
+visible = false

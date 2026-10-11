@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "style": "B_thick_brick",
+  "tile_px": 16,
+  "wall_face_px": 6,
+  "themes": [
+    {
+      "id": "base",
+      "name_cn": "基地（安全屋）",
+      "floor_min": 100,
+      "floor_max": 100,
+      "colors": {
+        "floor_field": "#7a5a3a",
+        "floor_grout": "#4a3520",
+        "floor_highlight": "#faf3e0",
+        "wall_top": "#f0e2c0",
+        "wall_joint": "#8a7458",
+        "wall_face": "#b0a184",
+        "wall_plinth": "#241a12",
+        "accent": "#f2a23c"
+      },
+      "note": "打磨木地板 + 暖漆砖墙，灯常亮，唯一暖调安全屋。"
+    },
+    {
+      "id": "mansion",
+      "name_cn": "豪宅层",
+      "floor_min": 71,
+      "floor_max": 99,
+      "colors": {
+        "floor_field": "#9e9a92",
+        "floor_grout": "#4a4842",
+        "floor_highlight": "#f2ede1",
+        "wall_top": "#e6e1d6",
+        "wall_joint": "#8f8a7d",
+        "wall_face": "#bcb4a4",
+        "wall_plinth": "#2b2823",
+        "accent": "#e8ce68"
+      },
+      "note": "大理石地 + 米黄石墙，金箔残光尚在，奢华将倾。"
+    },
+    {
+      "id": "mutation",
+      "name_cn": "突变层",
+      "floor_min": 41,
+      "floor_max": 70,
+      "colors": {
+        "floor_field": "#ad6a83",
+        "floor_grout": "#6b3a4d",
+        "floor_highlight": "#e0aec6",
+        "wall_top": "#d194b0",
+        "wall_joint": "#3a5230",
+        "wall_face": "#c07f9c",
+        "wall_plinth": "#2e1a24",
+        "accent": "#e8c4d2"
+      },
+      "note": "组织紫红肉墙 + 腐绿砖缝，生物黏膜覆满砖砌。"
+    },
+    {
+      "id": "blockade",
+      "name_cn": "封锁层",
+      "floor_min": 11,
+      "floor_max": 40,
+      "colors": {
+        "floor_field": "#3d3f4a",
+        "floor_grout": "#22242c",
+        "floor_highlight": "#8a8e9c",
+        "wall_top": "#7d8d61",
+        "wall_joint": "#3a442c",
+        "wall_face": "#66754f",
+        "wall_plinth": "#1b1d26",
+        "accent": "#f2a23c"
+      },
+      "note": "混凝土地 + 军绿漆砖墙，弹孔遍布，琥珀警示条。"
+    },
+    {
+      "id": "sublevel",
+      "name_cn": "底层",
+      "floor_min": 1,
+      "floor_max": 10,
+      "colors": {
+        "floor_field": "#1a2338",
+        "floor_grout": "#0a0b10",
+        "floor_highlight": "#6f8bb0",
+        "wall_top": "#55658a",
+        "wall_joint": "#1a2138",
+        "wall_face": "#3d4a68",
+        "wall_plinth": "#06070b",
+        "accent": "#9db8d6"
+      },
+      "note": "近黑机房蓝地 + 冷光砖墙，终端青只留一点微光。"
+    }
+  ]
+}
