@@ -345,8 +345,11 @@ func _try_dodge() -> void:
 		return
 	# R-144【不能闪避】：补给读条期间不能闪避（闪避是一次带位移的爆发动作，会破坏"不能移动"的语义）。
 	#   ⚠ 早退放在**扣体力之前**：否则"读条中按空格"会白扣一次体力却什么也不做。
+	# ⚠ R-new（用户新需求③）：长按 R 补给读条**可被翻滚（空格）打断** —— 取消补给后照常翻滚。
+	#   取消时把 `_r_long_fired` 置位：仍按住 R 时不自动重启补给（与 `fire()` 同款口径）。
 	if is_feeding:
-		return
+		_cancel_feeding()
+		_r_long_fired = true
 	if stamina < GameConstants.DODGE_STAMINA_COST:
 		return
 	state = State.DODGE
@@ -406,8 +409,15 @@ func _update_weapon(delta: float) -> void:
 func fire() -> void:
 	# R-144【不能开火】：补给读条期间不能开火（用户拍板）。
 	#   与 `is_reloading` 同一道门 —— 都是"手上的动作被占用"，语义一致。
-	if state == State.DEAD or is_reloading or is_feeding or fire_cd > 0.0 or ammo <= 0 or weapons.size() == 0:
+	# ⚠ R-new（用户新需求③）：长按 R 补给读条**可被射击打断** —— 一旦开火，
+	#   立即取消补给读条并照常开火（玩家手指按下 = 想开火， reload 让位）。
+	#   取消时把 `_r_long_fired` 置位：若玩家**仍按住 R**，0.5s 后不会自动重启补给
+	#   （否则"开火打断 → 继续按住 R → 半秒后自动重读条"会反复来回，手感诡异）。
+	if state == State.DEAD or is_reloading or fire_cd > 0.0 or ammo <= 0 or weapons.size() == 0:
 		return
+	if is_feeding:
+		_cancel_feeding()
+		_r_long_fired = true
 	var w: Dictionary = weapons[weapon_index]
 	ammo -= 1
 	ammo_list[weapon_index] = ammo

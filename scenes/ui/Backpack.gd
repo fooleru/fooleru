@@ -40,6 +40,14 @@ const PANEL_Y := 2.0
 const PANEL_H := 176.0
 const PANEL_LX := 2.0
 const PANEL_RX := VIEW_W - PANEL_LX - PANEL_W  # 162
+# R-new：排序按钮（点击按「类型 → 大小 → 重量」整理背包）。画在**左栏标题行右端**，
+#   横向还有富余（标题文字远未占满 156px 宽），不挤占已用满的网格/装备区（见文件头"余 6px"）。
+const SORT_BTN_W := 24.0
+const SORT_BTN_H := 9.0
+const SORT_BTN_X := PANEL_LX + PANEL_W - PAD - SORT_BTN_W   # 右对齐到左栏面板内
+const SORT_BTN_Y := PANEL_Y + 2.0
+func sort_button_rect() -> Rect2:
+	return Rect2(SORT_BTN_X, SORT_BTN_Y, SORT_BTN_W, SORT_BTN_H)
 const GRID_Y := PANEL_Y + HEADER_H             # 15（左栏纵向起点基准；右栏**不再**用它）
 const GRID_LX := PANEL_LX + (PANEL_W - GRID_W) * 0.5   # 20（120 在 156 内居中）
 const GRID_RX := PANEL_RX + (PANEL_W - CONT_W) * 0.5   # 180
@@ -361,10 +369,11 @@ func pick_test(pos: Vector2) -> Dictionary:
 #   ① 验证入口需要能**直接调用**它做断言（不依赖"鼠标恰好悬停在哪"）；
 #   ② 文案与绘制分离，改文案不会碰几何，改几何不会碰文案。
 # ⚠ **各项顺序固定（断言的前提）**：GDScript 的 Dictionary 遍历顺序**无保证**，
-#   所以这里**显式**按 heal → hunger → thirst → stamina → reduction → load_bonus → rounds 取，
+#   所以这里**显式**按 heal → hunger → thirst → stamina → reduction → load_bonus → rounds → weight 取，
 #   绝不 `for k in use:` 遍历。同理分隔符固定为" · "。
-# ⚠ **无恢复值的物品显示什么**：显示 `重量 {w}`（⚠ R-117 起**不再带 wg 后缀**，理由见下方注释），
-#   而不是留空或写"无效果" —— 重量本身对"这趟搜刮值不值得带"是有用信息。
+# ⚠ R-new：**每件物品都显示重量**（不再只作为"无恢复值时的兜底"）——
+#   用户需求「悬停物品信息加上重量」。重量对"这趟搜刮值不值得带"是有用信息，
+#   且对武器/护甲/弹药盒这类原本看不到重量的物品同样有意义（R-117 起**不带 wg 后缀**）。
 func item_desc(it: Dictionary) -> String:
 	if it.is_empty():
 		return ""
@@ -392,15 +401,14 @@ func item_desc(it: Dictionary) -> String:
 	# ---- 顺序 7：弹药盒发数（ammo 类才有 `rounds`）----
 	if it.has("rounds"):
 		parts.append("弹药 %d 发" % int(it["rounds"]))
-	# ---- 兜底：什么都没有（材料 / 纯战利品）→ 显示重量 ----
-	if parts.is_empty():
-		# ⚠ R-117：`重量 %.1fwg` → `Loc.t("backpack.desc_weight")` =「重量 %.1f」（**去掉 wg 后缀**）。
-		#   理由：`wg` 是 ASCII 字母（weight grams 的缩写），属玩家可见英文残留。
-		#   ⚠ **单位信息并未丢失**：左栏面板标题已写明「负重 13.5 / 60」（同一套重量数字），
-		#     且 `--verify-loadout2 ③` 钉死了暂停页的「负重  16.5 / 60.0」——重量语义由那两处承载。
-		#     单件物品行只回答「有多重」，不需要再带一次单位。
-		#   宽度实测 font 7：`重量 1.5wg` **36px** → `重量 1.5` **26px**，窄 10px。
-		parts.append(Loc.t("backpack.desc_weight") % float(it.get("weight", 0.0)))
+	# ---- 顺序 8（R-new）：重量 —— **每件物品都显示**（不再是"无效果时的兜底"）----
+	# ⚠ R-117：`重量 %.1fwg` → `Loc.t("backpack.desc_weight")` =「重量 %.1f」（**去掉 wg 后缀**）。
+	#   理由：`wg` 是 ASCII 字母（weight grams 的缩写），属玩家可见英文残留。
+	#   ⚠ **单位信息并未丢失**：左栏面板标题已写明「负重 13.5 / 60」（同一套重量数字），
+	#     且 `--verify-loadout2 ③` 钉死了暂停页的「负重  16.5 / 60.0」——重量语义由那两处承载。
+	#     单件物品行只回答「有多重」，不需要再带一次单位。
+	#   宽度实测 font 7：`重量 1.5wg` **36px** → `重量 1.5` **26px**，窄 10px。
+	parts.append(Loc.t("backpack.desc_weight") % float(it.get("weight", 0.0)))
 	return " · ".join(parts)
 
 # 悬停到的物品（用于显示名称 + 说明）
@@ -438,6 +446,7 @@ func _draw() -> void:
 	#   宽度实测 font 8：`负重 13.5 / 60 wg` **64px** → `负重 13.5 / 60` **51px**，窄 13px。
 	#   ⚠ **可用宽 = PANEL_W(156) − PAD(4) = 152px**，51px 安全（余 101px）。
 	_draw_panel(PANEL_LX, Loc.t("backpack.panel_load") % [cur_load, max_load])
+	_draw_sort_button()            # R-new：标题行右端的「排序」按钮
 	_draw_gear(font)               # R-101：装备栏（在网格**上方**）
 	_draw_grid(GRID_LX, INV_GRID_Y, items)
 	# 左栏底部：快捷栏（预留）
@@ -487,6 +496,15 @@ func _draw() -> void:
 		if hover_desc != "":
 			draw_string(font, Vector2(tx + 2.0, ty + 10.0 + TIP_DESC_H), hover_desc,
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 7, DIM)
+
+# ==== R-new：排序按钮绘制 ====
+# 标题行右端的「排序」小按钮：底板 + 描边 + 文字（走 Loc 表，与全工程 UI 文案一致）。
+func _draw_sort_button() -> void:
+	var r: Rect2 = sort_button_rect()
+	draw_rect(r, SLOT_BG)
+	draw_rect(r, GEAR_SLOT_LINE, false, 1.0)
+	draw_string(GameConstants.ui_font(), Vector2(r.position.x + 2.0, r.position.y + 7.0),
+		Loc.t("backpack.sort_btn"), HORIZONTAL_ALIGNMENT_LEFT, -1, 7, TEXT)
 
 # ==== R-101：装备栏绘制 ====
 # 一栏背景 + 标题

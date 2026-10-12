@@ -91,6 +91,7 @@ const T_ZH_CN: Dictionary = {
 	# ---- 背包：面板标题 + 悬停说明第2 行 ----
 	# ⚠ `%.1f` / `%d` 是**格式说明符**不是文案，`--verify-loc ①` 会先剥掉它们再查英文。
 	"backpack.panel_load": "负重 %.1f / %.0f",
+	"backpack.sort_btn": "排序",
 	"backpack.desc_heal": "回血 %d",
 	"backpack.desc_weight": "重量 %.1f",
 }

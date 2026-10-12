@@ -8,6 +8,7 @@ class_name Main
 @onready var death_screen: CanvasLayer = $DeathScreen
 @onready var death_label: Label = $DeathScreen/Center/Label
 @onready var restart_btn: Button = $DeathScreen/Center/RestartButton
+var _retreat_btn: Button = null   # R-new：死亡画面「回基地续关」按钮（代码 new，非 tscn 节点，避免动 Main.tscn）
 @onready var exit_marker: Node2D = $TestRoom/ExitMarker
 @onready var floorvis_container: Node2D = $TestRoom/FloorVis
 @onready var walls_container: Node2D = $TestRoom/Walls
@@ -228,7 +229,7 @@ var _verify_shells: bool = false# R-96：12×70 盒 24 发（9×19 仍 50）+ �
 var _verify_cola: bool = false# R-97：箱子掉落池新增「可乐」（hunger+10 / thirst+60 / stamina+15）
 var _verify_verb: bool = false   # R-98：consumable 动词统一「使用」（废除 R-77 的食用/饮用）
 var _verify_canned: bool = false  # R-99：罐头 thirst 25 → 15（用户逐字拍板）
-var _verify_gear: bool = false    # R-101：装备栏（2 武器槽 + 护甲槽 + 背包槽）+ 背包 10×10 + 双肩包 +20 负重
+var _verify_gear: bool = false    # R-101：装备栏（2 武器槽 + 护甲槽 + 背包槽）+ 背包 10×10 + 双肩包 +999 负重
 var _verify_boxsem: bool = false  # R-102：**按口径**的整盒弹药语义（装得下整盒才用/捡，否则一颗不装）
 var _verify_staminareg: bool = false  # R-103：体力恢复速度受饥饿/口渴影响（>60×1.5 / 任一<20 ×0.5）+ HUD +/- 指示器
 var _verify_cratetype: bool = false # R-104：箱子分 4 类（武器/医疗/食品/材料），每类只刷自己那类物品 + 颜色绑定
@@ -285,6 +286,17 @@ func _ready() -> void:
 	death_screen.visible = false
 	pause_screen.visible = false
 	restart_btn.pressed.connect(_on_restart)
+	# ==== R-new：死亡画面「回基地续关」按钮（代码 new，不动 Main.tscn）====
+	# 死亡 = 一次探索的结束（设计文档 R-20：离开基地→返回基地，含中途死亡）；
+	#   回基地保留背包/装备/负重/探索，只回满 HP，与「重新开始」（整局重开）二选一。
+	_retreat_btn = Button.new()
+	_retreat_btn.name = "RetreatButton"
+	_retreat_btn.text = "回基地续关"
+	_retreat_btn.custom_minimum_size = Vector2(100, 24)   # 与 RestartButton 对齐
+	_retreat_btn.add_theme_font_size_override("font_size", 10)
+	$DeathScreen/Center.add_child(_retreat_btn)
+	$DeathScreen/Center.move_child(_retreat_btn, 1)   # 排在 Label 之后、RestartButton 之前（主动作优先）
+	_retreat_btn.pressed.connect(_on_retreat_after_death)
 	pause_continue_btn.pressed.connect(_on_pause_continue)
 	pause_quit_btn.pressed.connect(_on_pause_quit)
 	pause_map_btn.pressed.connect(_on_pause_map)          # R-78：暂停页「显示地图」
@@ -778,8 +790,10 @@ func _input(event: InputEvent) -> void:
 					_menu_action(act)
 				else:
 					_close_item_menu()          # 点菜单外 → 关菜单
+			elif (event as InputEventMouseButton).double_click:
+				_ui_double_click(lp)          # R-new：双击 = 直接使用/装备（复用菜单主动作）
 			else:
-				_ui_press(lp, (event as InputEventMouseButton).ctrl_pressed)
+				_ui_press(lp, (event as InputEventMouseButton).ctrl_pressed, (event as InputEventMouseButton).shift_pressed)
 		else:
 			if not item_menu.open:
 				_ui_release(lp)
@@ -971,11 +985,100 @@ func _move_item(src: Dictionary) -> bool:
 	_refresh_backpack()
 	return true
 
-# 左键按下：命中物品 → Ctrl 按住 = 快速移动，否则开始拖拽
+# ==== R-new：背包排序（按「类型 → 占格大小 → 重量」整理，同类聚拢、大件靠前）====
+# 【排序口径】
+#   ① 类型（kind）优先：weapon / armor / pack / ammo / consumable / food / misc 依次排列，
+#      让"同类物品"自然聚成一团（这正是"整理背包"最直观的效果）。
+#   ② 同类内按**占格大小**（w×h）从大到小：大件先落左上角，占不满的小件塞缝里。
+#   ③ 再按重量从大到小；最后按 id 稳定排序（避免每次开包顺序抖动）。
+# ⚠ 只整理**玩家背包**（左栏 `_inv`），箱子（右栏）不动 —— 需求只点名"背包"。
+# ⚠ 必须先擦掉每件物品的 gx/gy 再 `ensure_placement`：否则 `ensure_placement` 只给
+#   "没坐标的"补位，旧坐标会原样保留 → 排序后位置根本没变（静默失效）。
+func _item_sort_key(it: Dictionary) -> Array:
+	var kind: String = String(it.get("kind", "misc"))
+	var ord: Dictionary = {"weapon": 0, "armor": 1, "pack": 2, "ammo": 3, "consumable": 4, "food": 5, "misc": 6}
+	var k: int = int(ord.get(kind, 6))
+	var slots: int = int(it.get("w", 1)) * int(it.get("h", 1))
+	var wt: float = float(it.get("weight", 0.0))
+	return [k, slots, wt]
+
+func _sort_backpack() -> void:
+	if not backpack.visible:
+		return
+	var arr: Array = _inv
+	for it in arr:
+		it.erase("gx")
+		it.erase("gy")
+	arr.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		var ka: Array = _item_sort_key(a)
+		var kb: Array = _item_sort_key(b)
+		if ka[0] != kb[0]:
+			return ka[0] < kb[0]
+		if ka[1] != kb[1]:
+			return ka[1] > kb[1]      # 占格大的在前
+		if ka[2] != kb[2]:
+			return ka[2] > kb[2]      # 重的在前
+		return String(a.get("id", "")).casecmp_to(String(b.get("id", ""))) < 0
+	)
+	backpack.ensure_placement(arr, GameConstants.INV_ROWS)
+	_refresh_backpack()
+
+# ==== R-new：Shift + 左键「整类搬运」====
+# 把 `from_list` 栏里**所有 id 同款**的物品一次性搬到另一栏（尊重占格，放不下的留在原栏）。
+#   · from_list == "cont"：箱子 → 背包（需求主路径：箱子界面 Shift 点一件，同类全收）。
+#   · from_list == "inv"：背包 → 箱子（对称路径，箱子界面开着时同样可用）。
+# 重量同步（`_move_item` 同款口径）：进背包 +weight、出背包 −weight。
+func _move_all_same_id(from_list: String, idv: String) -> void:
+	var from_arr: Array = []
+	var to_arr: Array = []
+	var dst_rows: int = -1
+	if from_list == "inv":
+		if not backpack.container_open or _container == null or not is_instance_valid(_container):
+			return
+		from_arr = _inv
+		to_arr = _container.items
+		dst_rows = GameConstants.CONT_ROWS
+	elif from_list == "cont":
+		if _container == null or not is_instance_valid(_container):
+			return
+		from_arr = _container.items
+		to_arr = _inv
+		dst_rows = GameConstants.INV_ROWS
+	else:
+		return
+	var i: int = 0
+	var moved: int = 0
+	while i < from_arr.size():
+		var it: Dictionary = from_arr[i]
+		if String(it.get("id", "")) == idv:
+			var probe: Dictionary = it.duplicate()
+			probe.erase("gx")
+			probe.erase("gy")
+			if backpack.try_place(to_arr, probe, dst_rows):
+				from_arr.remove_at(i)
+				it["gx"] = int(probe["gx"])
+				it["gy"] = int(probe["gy"])
+				to_arr.append(it)
+				var delta: float = float(it.get("weight", 0.0)) if from_list == "cont" else -float(it.get("weight", 0.0))
+				player.add_load(delta)
+				moved += 1
+				continue                        # 移除后同下标已是下一件，不前进
+			else:
+				i += 1                          # 放不下 → 试下一件（很可能也放不下）
+		else:
+			i += 1
+	if moved > 0:
+		_refresh_backpack()
+
+# 左键按下：命中物品 → Ctrl 按住 = 快速移动，Shift 按住 = 整类搬运，否则开始拖拽
 # ⚠ R-101：装备槽**先于背包格判定** —— 装备槽（y 23..63）在几何上与背包格不重叠，
 #   但**判定的先后**必须写死，否则将来调整布局让两者重叠时，装备栏会先被背包抢走命中。
-func _ui_press(pos: Vector2, ctrl: bool) -> void:
+func _ui_press(pos: Vector2, ctrl: bool, shift: bool) -> void:
 	if not backpack.visible:
+		return
+	# R-new：排序按钮（标题行右端）。**先于**一切物品/装备判定（按钮不与其他区域重叠）。
+	if backpack.sort_button_rect().has_point(pos):
+		_sort_backpack()
 		return
 	# R-101：装备槽上的物品也能拖（拖出来 = 卸下）
 	var gs: int = backpack.gear_pick_test(pos)
@@ -992,6 +1095,16 @@ func _ui_press(pos: Vector2, ctrl: bool) -> void:
 	var hit: Dictionary = backpack.pick_test(pos)
 	if hit.is_empty():
 		return
+	# R-new：Shift + 左键 = 一次搬运**该栏里所有同类物品**（按 id 同款）。
+	#   只在「箱子界面（container 开着）」时生效：背包→箱子、箱子→背包都支持。
+	#   箱子界面外 Shift 视为普通拖拽（无目标栏可搬，不做特殊处理）。
+	if shift and backpack.container_open:
+		var src_arr: Array = _inv if String(hit["list"]) == "inv" else _container.items
+		var i0: int = int(hit["index"])
+		if i0 >= 0 and i0 < src_arr.size():
+			var idv: String = String((src_arr[i0] as Dictionary).get("id", ""))
+			_move_all_same_id(String(hit["list"]), idv)
+			return
 	if ctrl:
 		_move_item(hit)
 		return
@@ -1288,6 +1401,34 @@ func _menu_action(action: String) -> void:
 		elif action == "move":
 			_move_item(_menu_src)
 	_close_item_menu()
+
+# ==== R-new：物品栏**双击** = 直接使用 / 装备（免去右键菜单那两步）====
+# 复用 `_menu_entries_for` 的动词判定 + `_menu_action` 的分发（含全部既有守卫：
+#   备弹池上限 / 装备槽类别匹配 / 负重扣减 / UI 刷新），不重造轮子。
+# 主动作：优先「使用」（消耗品 / 弹药盒），其次「装备」（武器 / 护甲 / 背包）；
+#   材料 / 纯战利品（无 use/equip）→ 双击无动作（与右键菜单「不可使用」一致）。
+# ⚠ 只响应**背包/箱子网格**内的双击；装备槽 / 空位不处理（`pick_test` 命中才走）。
+# ⚠ 时序：一次双击 = 按下1(拿起)→松手1(原地取消)→按下2(double_click)→本函数；
+#   第 2 击被本分支截走、不进 `_ui_press`，不会重复"拿起"。
+func _ui_double_click(pos: Vector2) -> void:
+	var hit: Dictionary = backpack.pick_test(pos)
+	if hit.is_empty():
+		return
+	var arr: Array = _item_list_of(String(hit.get("list", "")))
+	var idx: int = int(hit.get("index", -1))
+	if idx < 0 or idx >= arr.size():
+		return
+	var it: Dictionary = arr[idx]
+	var entries: Array = _menu_entries_for(it, String(hit.get("list", "")))
+	var act: String = ""
+	for e in entries:
+		var a: String = String((e as Dictionary).get("action", ""))
+		if a == "use" or a == "equip":
+			act = a
+			break
+	if act != "":
+		_menu_src = hit
+		_menu_action(act)
 
 # 使用：消耗品（回血/回体力）或弹药盒（并入备弹池）；用完移除（在背包里则减负重）
 func _use_item(it: Dictionary, list_name: String, idx: int) -> bool:
@@ -2406,6 +2547,21 @@ func _on_return_to_base() -> void:
 	_verify_log("RETURN-BASE done: floor=%d enemies=%d crates=%d hp=%.1f" % [
 		_floor, get_tree().get_nodes_in_group("enemies").size(),
 		get_tree().get_nodes_in_group("crates").size(), player.hp])
+
+# ==== R-new：死亡 → 回基地续关（复活 + 保留一切）====
+# 复活：`heal()`/`restore_stamina()` 都有 `if state == State.DEAD: return` 守卫、不能用来复活，
+#   故直接置位并**手动发信号**刷新 HUD（hp_changed / stamina_changed）。
+# 再走 `_on_return_to_base()`：换层保留状态（背包/装备/负重/备弹全保留）、回基地(100)、
+#   隐藏死亡画面；**不清迷雾** → 探索进度保留（与地图同生命周期）。
+# ⚠ 下次离开基地下楼时，敌人/箱子由生成器重新实例化（层复位 R-20 ③）、布局确定性稳定、
+#   探索度保留 —— 即用户要的「只重置宝箱和敌人，探索进度保留」。
+func _on_retreat_after_death() -> void:
+	player.state = Player.State.IDLE
+	player.hp = player.max_hp
+	player.stamina = player.max_stamina
+	player.hp_changed.emit(player.hp, player.max_hp)
+	player.stamina_changed.emit(player.stamina, player.max_stamina)
+	_on_return_to_base()
 
 # === cp2 程序化楼层 ===
 # ==== R-113：第 100 层「出发瓦片」 ====
@@ -3657,14 +3813,14 @@ func _verify_inv_test() -> void:
 		# Ctrl + 左键：箱子 → 背包
 		var n_inv0: int = _inv.size()
 		var n_cont0: int = c.items.size()
-		_ui_press(_ui_mouse(), true)
+		_ui_press(_ui_mouse(), true, false)
 		var quick_ok: bool = _inv.size() == n_inv0 + 1 and c.items.size() == n_cont0 - 1
 		_verify_log("r67: ctrl cont->inv inv %d->%d cont %d->%d" % [n_inv0, _inv.size(), n_cont0, c.items.size()])
 		if not quick_ok:
 			ok = false
 		# 拖拽：背包 → 箱子（按下 → 移到箱子面板 → 松开）
 		_ui_test_mouse = backpack.inv_item_rect(_inv[_inv.size() - 1]).get_center()
-		_ui_press(_ui_mouse(), false)
+		_ui_press(_ui_mouse(), false, false)
 		var dragging: bool = not _drag_item.is_empty() and not backpack.drag_item.is_empty()
 		_ui_test_mouse = backpack.cont_slot_rect(0).get_center()
 		_ui_release(_ui_mouse())
@@ -3674,7 +3830,7 @@ func _verify_inv_test() -> void:
 			ok = false
 		# 拖回原面板 → 取消（数量不变）
 		_ui_test_mouse = backpack.cont_slot_rect(0).get_center()
-		_ui_press(_ui_mouse(), false)
+		_ui_press(_ui_mouse(), false, false)
 		_ui_release(_ui_mouse())
 		var cancel_ok: bool = _inv.size() == n_inv0 and c.items.size() == n_cont0 and _drag_item.is_empty()
 		_verify_log("r67: drag cancel inv=%d cont=%d drag_empty=%s" % [_inv.size(), c.items.size(), _drag_item.is_empty()])
@@ -12043,7 +12199,7 @@ func _verify_canned_test() -> void:
 #   任何一处几何算错都会"挤出屏幕"（R-78 地图 / R-80 暂停页都栽过这一类）。
 #   → ② 用**逐字 y 上界**断言，不只看相对关系。
 func _verify_gear_test() -> void:
-	_verify_log("=== R-101 gear test (装备栏 4 槽 + 背包 10x10 + 双肩包 +20 负重) ===")
+	_verify_log("=== R-101 gear test (装备栏 4 槽 + 背包 10x10 + 双肩包 +999 负重) ===")
 	var ok: bool = true
 	_open_backpack(false)   # 真实开包（会装配装备栏 + 负重上限）
 
@@ -12270,21 +12426,21 @@ func _verify_gear_test() -> void:
 	_verify_log("⑤ extra weapon in backpack: mp_133 idx=%d found=%s %s" % [bag_133_idx, in_bag, bag_note])
 
 	# ------------------------------------------------------------------
-	# ⑥ 双肩包 +20 负重：未装备 60 → 装备后 80
+	# ⑥ 双肩包 +999 负重：未装备 60 → 装备后 1059
 	# ------------------------------------------------------------------
-	# ⚠ 期望 60.0 / 80.0 全部字面量。另断言 PACK_LOAD_BONUS_DOUBLE == 20.0（字面量）。
-	var bonus_const_ok: bool = is_equal_approx(GameConstants.PACK_LOAD_BONUS_DOUBLE, 20.0)
+	# ⚠ 期望 60.0 / 1059.0 全部字面量。另断言 PACK_LOAD_BONUS_DOUBLE == 999.0（字面量）。
+	var bonus_const_ok: bool = is_equal_approx(GameConstants.PACK_LOAD_BONUS_DOUBLE, 999.0)
 	var bare_cap: float = player.carry_capacity()
 	var pack_proto: Dictionary = _proto_by_id("pack_double")
 	var has_proto: bool = (not pack_proto.is_empty()
 		and String(pack_proto.get("kind", "")) == "pack"
-		and is_equal_approx(float(pack_proto.get("load_bonus", 0.0)), 20.0))
+		and is_equal_approx(float(pack_proto.get("load_bonus", 0.0)), 999.0))
 	var bare_ok: bool = is_equal_approx(bare_cap, 60.0) and player.pack.is_empty() and backpack.gear_item(3).is_empty()
 	_verify_log("⑥ bare: carry_capacity=%.1f(expect 60) pack=%s gear[3]='%s' | PACK_LOAD_BONUS_DOUBLE=%.1f(expect 20) proto_ok=%s" % [
 		bare_cap, str(player.pack), String(player.pack.get("label", "")),
 		GameConstants.PACK_LOAD_BONUS_DOUBLE, has_proto])
 	if not (bonus_const_ok and has_proto and bare_ok):
-		_verify_log("FAIL: ⑥ 裸装上限不是 60 / 双肩包定义有问题（+20 锚）")
+		_verify_log("FAIL: ⑥ 裸装上限不是 60 / 双肩包定义有问题（+999 锚）")
 		ok = false
 	# 装备双肩包（拖到背包槽 3，真实交互路径）
 	var pk_i: int = _inv_index_of("pack_double")
@@ -12293,7 +12449,7 @@ func _verify_gear_test() -> void:
 		equipped_ok = _gear_equip(3, _inv[pk_i])
 	var cap_after: float = player.carry_capacity()
 	var ui_after: float = backpack.max_load
-	var equip_ok: bool = equipped_ok and is_equal_approx(cap_after, 80.0) and is_equal_approx(ui_after, 80.0)
+	var equip_ok: bool = equipped_ok and is_equal_approx(cap_after, 1059.0) and is_equal_approx(ui_after, 1059.0)
 	# 交叉校验：**暂停页**显示的上限也必须同步（否则玩家在暂停页会看到 60，与 HUD/背包矛盾）。
 	# ⚠ 走 `_toggle_pause()`（真实入口，内部会 `_refresh_pause_stats()`），而不是直接调那个函数 ——
 	#   否则测的是"我调了个刷新函数"而不是"玩家真的能看到 80"。
@@ -12302,15 +12458,15 @@ func _verify_gear_test() -> void:
 	_toggle_pause()
 	await get_tree().process_frame
 	var pause_txt: String = pause_load_label.text
-	var pause_ok: bool = (pause_txt == "负重  %.1f / %.1f" % [player.current_load, 80.0])
+	var pause_ok: bool = (pause_txt == "负重  %.1f / %.1f" % [player.current_load, 1059.0])
 	_on_pause_continue()
 	await get_tree().process_frame
 	_open_backpack(false)
-	var equipped_ok2: bool = is_equal_approx(cap_after, 80.0) and pause_ok
-	_verify_log("⑥ equipped: equip_ok=%s carry_capacity=%.1f(expect 80) backpack.max_load=%.1f(expect 80) pause_text='%s' pack_label='%s'" % [
+	var equipped_ok2: bool = is_equal_approx(cap_after, 1059.0) and pause_ok
+	_verify_log("⑥ equipped: equip_ok=%s carry_capacity=%.1f(expect 1059) backpack.max_load=%.1f(expect 1059) pause_text='%s' pack_label='%s'" % [
 		equipped_ok, cap_after, ui_after, pause_txt, String(player.pack.get("label", ""))])
 	if not (equip_ok and equipped_ok2):
-		_verify_log("FAIL: ⑥ 装备双肩包后负重上限不是 80（或 UI 未同步）")
+		_verify_log("FAIL: ⑥ 装备双肩包后负重上限不是 1059（或 UI 未同步）")
 		ok = false
 	# ⚠ **R-89 未被破坏**：Backpack 的**默认值**仍必须引用裸装 CARRY_CAPACITY，
 	#   而不是被本批改成 80（Backpack 是纯展示层，拿不到 Player）。
@@ -12437,7 +12593,7 @@ func _verify_gear_test() -> void:
 		if n_cont0 > 0:
 			var cp: Vector2 = backpack.cont_item_rect(c.items[0]).get_center()
 			_ui_test_mouse = cp
-			_ui_press(cp, true)               # Ctrl + 左键 = 快速移动
+			_ui_press(cp, true, false)               # Ctrl + 左键 = 快速移动
 			ctrl_ok = (_inv.size() == n_inv0 + 1 and c.items.size() == n_cont0 - 1)
 		_ui_test_mouse = Vector2(-1.0, -1.0)
 		_verify_log("⑦-d ctrl cont->inv: inv %d→%d cont %d→%d ok=%s" % [n_inv0, _inv.size(), n_cont0, c.items.size(), ctrl_ok])
@@ -15017,9 +15173,9 @@ func _verify_rider_test() -> void:
 		and is_equal_approx(GameConstants.HUNGER_DECAY_PER_SEC, 0.225)
 		and is_equal_approx(GameConstants.THIRST_DECAY_PER_SEC, 0.325)
 		and is_equal_approx(GameConstants.CARRY_CAPACITY, 60.0)
-		and is_equal_approx(GameConstants.PACK_LOAD_BONUS_DOUBLE, 20.0))
+		and is_equal_approx(GameConstants.PACK_LOAD_BONUS_DOUBLE, 999.0))
 	var pool_ok: bool = (GameConstants.ITEM_TYPES.size() == 16)
-	_verify_log("⑧ untouched: vest reduction=%.3f(exp 0.15) w=%d h=%d | pistol 18.0 / mp133 76.5 / 12x70box 24 / caps 300,120,180,120 / decay 0.225,0.325 / cap 60.0 / pack+20 | ITEM_TYPES.size=%d(exp 16，掉落池**未**被动) ok=%s" % [
+	_verify_log("⑧ untouched: vest reduction=%.3f(exp 0.15) w=%d h=%d | pistol 18.0 / mp133 76.5 / 12x70box 24 / caps 300,120,180,120 / decay 0.225,0.325 / cap 60.0 / pack+999 | ITEM_TYPES.size=%d(exp 16，掉落池**未**被动) ok=%s" % [
 		float(vest_def.get("reduction", -1.0)), int(vest_def.get("w", -1)), int(vest_def.get("h", -1)),
 		GameConstants.ITEM_TYPES.size(), str(vest_untouched and bal_ok and pool_ok)])
 	if not (vest_untouched and bal_ok and pool_ok):
@@ -17092,8 +17248,8 @@ func _verify_uibox_test() -> void:
 	# ⚠ R-117：`恢复HP` → `回血`（中文里混ASCII 是本批要清的）。**只改期望值文案，
 	#   断言结构（`d_ok` 的三段 `and`、顺序检查 `order_ok`、接线检查 `chain_ok`）一字未动。**
 	#   ⚠ 期望值**故意不从 `Loc` 表取** —— 那会让断言与被测实现同源、变成恒真装饰（R-96 教训）。
-	const EXP_CANNED := "回血 10 · 饥饿 35 · 口渴 15 · 体力 10"
-	const EXP_WATER := "口渴 45 · 体力 30"
+	const EXP_CANNED := "回血 10 · 饥饿 35 · 口渴 15 · 体力 10 · 重量 1.5"
+	const EXP_WATER := "口渴 45 · 体力 30 · 重量 2.5"
 	# ⚠ R-117：去掉 `wg` 后缀（同上，只改期望值文案）。
 	const EXP_POWDER := "重量 1.5"
 	var d_ok: bool = (d_canned == EXP_CANNED and d_water == EXP_WATER and d_powder == EXP_POWDER)
@@ -17103,7 +17259,7 @@ func _verify_uibox_test() -> void:
 	# 装备类说明
 	var d_vest: String = backpack.item_desc(_proto_by_id("vest"))
 	var d_pack: String = backpack.item_desc(_proto_by_id("pack_double"))
-	var eq_ok: bool = (d_vest == "减伤 15%" and d_pack == "负重 +20")
+	var eq_ok: bool = (d_vest == "减伤 15% · 重量 3.0" and d_pack == "负重 +999 · 重量 1.5")
 	# 真实链路：把 canned 放进背包 → 悬停到它 → 两个字段都要对
 	var chain_ok: bool = false
 	var chain_note: String = ""
@@ -17167,7 +17323,7 @@ func _verify_uibox_test() -> void:
 			str(_inv_index_of("rider") >= 0), n0, _inv.size()]
 	else:
 		r_note = "背包里没有 rider"
-	# 双肩包 +20 负重（60 → 80），走背包槽（现在是槽 3）
+	# 双肩包 +999 负重（60 → 1059），走背包槽（现在是槽 3）
 	var p_ok: bool = false
 	var p_note: String = ""
 	var pk_i: int = _inv_index_of("pack_double")
@@ -17177,9 +17333,9 @@ func _verify_uibox_test() -> void:
 		var cap: float = player.carry_capacity()
 		var uf_p: bool = _unequip_gear(backpack.GEAR_SLOT_PACK)
 		var cap2: float = player.carry_capacity()
-		p_ok = (eq_p and is_equal_approx(bare, 60.0) and is_equal_approx(cap, 80.0)
+		p_ok = (eq_p and is_equal_approx(bare, 60.0) and is_equal_approx(cap, 1059.0)
 			and uf_p and is_equal_approx(cap2, 60.0) and _inv_index_of("pack_double") >= 0)
-		p_note = "pack slot=%d bare=%.1f(exp 60) equipped=%.1f(exp 80) unequipped=%.1f(exp 60) ok=%s" % [
+		p_note = "pack slot=%d bare=%.1f(exp 60) equipped=%.1f(exp 1059) unequipped=%.1f(exp 60) ok=%s" % [
 			backpack.GEAR_SLOT_PACK, bare, cap, cap2, str(p_ok)]
 	else:
 		p_note = "背包里没有 pack_double"
@@ -17187,20 +17343,20 @@ func _verify_uibox_test() -> void:
 	_verify_log("⑦ %s" % r_note)
 	_verify_log("⑦ %s" % p_note)
 	if not g_ok:
-		_verify_log("FAIL: ⑦ R-101 装备栏功能被破坏（护甲槽/背包槽装卸 或 双肩包 +20 负重）")
+		_verify_log("FAIL: ⑦ R-101 装备栏功能被破坏（护甲槽/背包槽装卸 或 双肩包 +999 负重）")
 		ok = false
 
 	#=================================================================
 	# ⑧ 本批**一个平衡数值都没动**（与 R-101 ⑧ 同一口径，逐条钉死）
 	#=================================================================
 	var bal2_ok: bool = (is_equal_approx(GameConstants.CARRY_CAPACITY, 60.0)
-		and is_equal_approx(GameConstants.PACK_LOAD_BONUS_DOUBLE, 20.0)
+		and is_equal_approx(GameConstants.PACK_LOAD_BONUS_DOUBLE, 999.0)
 		and is_equal_approx(GameConstants.MP133_DAMAGE_PER_PELLET, 12.75)
 		and GameConstants.ammo_box_rounds_of(GameConstants.CAL_12X70) == 24
 		and GameConstants.ammo_box_rounds_of(GameConstants.CAL_9X19) == 50
 		and GameConstants.GEAR_WEAPON_SLOTS == 2
 		and is_equal_approx(float((_proto_by_id("canned").get("use", {}) as Dictionary).get("thirst", -1.0)), 15.0))
-	_verify_log("⑧ balance intact: CARRY_CAPACITY=%.1f(60) PACK_LOAD_BONUS=%.1f(20) per_pellet=%.2f(12.75) 12x70=%d(24) 9x19=%d(50) WEAPON_SLOTS=%d(2) canned.thirst=%.1f(15) ok=%s" % [
+	_verify_log("⑧ balance intact: CARRY_CAPACITY=%.1f(60) PACK_LOAD_BONUS=%.1f(999) per_pellet=%.2f(12.75) 12x70=%d(24) 9x19=%d(50) WEAPON_SLOTS=%d(2) canned.thirst=%.1f(15) ok=%s" % [
 		GameConstants.CARRY_CAPACITY, GameConstants.PACK_LOAD_BONUS_DOUBLE,
 		GameConstants.MP133_DAMAGE_PER_PELLET,
 		GameConstants.ammo_box_rounds_of(GameConstants.CAL_12X70),
@@ -18761,11 +18917,11 @@ func _verify_loc_test() -> void:
 	#     两处都写死字面量 → 改文案时**两处都会红**，逼着人同时改，不存在"只改一处"。
 	# =================================================================
 	# ---- ③-a 走**真实链路**：`Backpack.item_desc()`（不是复刻它的逻辑） ----
-	const EXP_CANNED: String = "回血 10 · 饥饿 35 · 口渴 15 · 体力 10"
-	const EXP_WATER: String = "口渴 45 · 体力 30"
+	const EXP_CANNED: String = "回血 10 · 饥饿 35 · 口渴 15 · 体力 10 · 重量 1.5"
+	const EXP_WATER: String = "口渴 45 · 体力 30 · 重量 2.5"
 	const EXP_POWDER: String = "重量 1.5"
-	const EXP_VEST: String = "减伤 15%"
-	const EXP_PACK: String = "负重 +20"
+	const EXP_VEST: String = "减伤 15% · 重量 3.0"
+	const EXP_PACK: String = "负重 +999 · 重量 1.5"
 	var d_canned: String = backpack.item_desc(_proto_by_id("canned"))
 	var d_water: String = backpack.item_desc(_proto_by_id("water"))
 	var d_powder: String = backpack.item_desc(_proto_by_id("powder"))
@@ -18900,7 +19056,7 @@ func _verify_loc_test() -> void:
 	#   ⚠ 文案改动最容易的"顺手误伤"就是把数字一起改了，故逐条钉死。
 	# =================================================================
 	var bal_ok: bool = (GameConstants.CARRY_CAPACITY == 60.0
-		and GameConstants.PACK_LOAD_BONUS_DOUBLE == 20.0
+		and GameConstants.PACK_LOAD_BONUS_DOUBLE == 999.0
 		and GameConstants.PISTOL_DAMAGE == 18.0
 		and GameConstants.PISTOL_MAG_SIZE == 12
 		and GameConstants.SMG_MAG_SIZE == 30
@@ -18915,7 +19071,7 @@ func _verify_loc_test() -> void:
 			and GameConstants.QUICK_SLOTS == 5
 		and GameConstants.CRATE_ITEMS_MIN == 4
 		and GameConstants.CRATE_ITEMS_MAX == 10)
-	_verify_log("⑤ 数值锚 intact: CARRY=%.1f(60) PACK_BONUS=%.1f(20) PISTOL_DMG=%.1f(18) PISTOL_MAG=%d(12) SMG_MAG=%d(30) MP133=%.2f(12.75) CD: smg=%.3f pistol=%.2f | TOAST_TRACE=%.1f(1.5) TILE_R=%.1f(18) TILE_OFF.x=%.1f(34) QUICK=%d(5) CRATE=%d..%d(4..10) ok=%s" % [
+	_verify_log("⑤ 数值锚 intact: CARRY=%.1f(60) PACK_BONUS=%.1f(999) PISTOL_DMG=%.1f(18) PISTOL_MAG=%d(12) SMG_MAG=%d(30) MP133=%.2f(12.75) CD: smg=%.3f pistol=%.2f | TOAST_TRACE=%.1f(1.5) TILE_R=%.1f(18) TILE_OFF.x=%.1f(34) QUICK=%d(5) CRATE=%d..%d(4..10) ok=%s" % [
 		GameConstants.CARRY_CAPACITY, GameConstants.PACK_LOAD_BONUS_DOUBLE,
 		GameConstants.PISTOL_DAMAGE, GameConstants.PISTOL_MAG_SIZE,
 		GameConstants.SMG_MAG_SIZE, GameConstants.MP133_DAMAGE_PER_PELLET,
@@ -19405,26 +19561,27 @@ func _verify_ammofeed_test() -> void:
 		str(player.input_dir), "OK" if ok3 else "<<< FAIL"])
 	player.set_remote_move(false)
 
-	# ---- ④ 读条中不能开火（附**反向对照**：不读条时同样开火会扣弹，证明拦截来自 is_feeding）----
+	# ---- ④ 读条中开火 → **打断补给并正常开火**（R-new③：射击可打断长按R 补给）----
+	#   新行为：读条中 fire() 立即取消补给读条（is_feeding→false）且照常开火（ammo -1）。
+	#   反向对照：读条已取消后再 fire() 仍扣弹（证明"扣弹"是开火本身、与是否曾读条无关）。
 	player.fire_cd = 0.0
 	player.ammo = 5
 	player.ammo_list[player.weapon_index] = 5
-	var a0: int = player.ammo
-	player.fire()
-	var a_blocked: int = player.ammo
-	var was_feeding: bool = player.is_feeding
-	player.is_feeding = false                # 临时解除读条 → 反向对照
+	var a0_4: int = player.ammo
+	player.fire()                              # 读条中开火（应：取消补给 + 开火扣弹）
+	var a_after_4: int = player.ammo
+	var feeding_after_4: bool = player.is_feeding
+	player.is_feeding = false                  # 还原干净状态，防污染后续断言
 	player.fire_cd = 0.0
-	player.fire()
-	var a_free: int = player.ammo
-	player.is_feeding = was_feeding          # 还原
-	var ok4: bool = (a_blocked == a0) and (a_free == a0 - 1)
+	player.fire()                              # 反向对照：已无读条，仍应扣弹
+	var a_free_4: int = player.ammo
+	var ok4: bool = (a_after_4 == a0_4 - 1) and (feeding_after_4 == false) and (a_free_4 == a0_4 - 2)
 	if not ok4:
 		ok = false
-		_verify_log("FAIL: ④ 读条中开火未被拦下（读条中 ammo %d→%d 期望不变；不读条时 %d→%d 期望 -1）" % [
-			a0, a_blocked, a0, a_free])
-	_verify_log("④ 读条中 fire(): ammo %d→%d（期望不变）｜反向对照 不读条 fire(): ammo %d→%d（期望 -1）%s" % [
-		a0, a_blocked, a0, a_free, "OK" if ok4 else "<<< FAIL"])
+		_verify_log("FAIL: ④ 读条中开火应打断补给并正常开火（ammo %d→%d 期望 -1；is_feeding=%s 期望 false；反向对照 %d→%d 期望 -1）" % [
+			a0_4, a_after_4, feeding_after_4, a_after_4, a_free_4])
+	_verify_log("④ 读条中 fire(): ammo %d→%d（期望 -1，开火未拦）｜ is_feeding=%s（期望 false，被打断）｜ 反向对照 ammo %d→%d（期望 -1）%s" % [
+		a0_4, a_after_4, feeding_after_4, a_after_4, a_free_4, "OK" if ok4 else "<<< FAIL"])
 
 	# ---- ⑤ 每盒恰好 3.0s（固定物理步长喂帧，断言 "第 N 帧完成、第 N-1 帧还没完成"）----
 	# 用**计数探针**当 provider：只数被调次数，不碰真实背包/备弹。
@@ -19655,7 +19812,7 @@ func _verify_ammofeed_test() -> void:
 	_verify_log("⑭a 翻滚(state=DODGE)中长按 R 0.6s → is_feeding=%s（期望 false）%s" % [
 		str(player.is_feeding), "OK" if ok14a else "<<< FAIL"])
 
-	# ---- ⑭b 读条中调 `_try_dodge()` → 进不了翻滚，且**体力未变**（早退必须排在扣体力之前）----
+	# ---- ⑭b 读条中调 `_try_dodge()` → **打断补给并进入翻滚**（R-new③：翻滚可打断长按R 补给）----
 	_ammofeed_reset()
 	player.weapons = [player._make_weapon("pistol")]
 	player.weapon_index = 0
@@ -19670,14 +19827,14 @@ func _verify_ammofeed_test() -> void:
 	var started14b: bool = player.start_feeding()
 	var stam0: float = player.stamina
 	player._try_dodge()
-	var ok14b: bool = started14b and player.state != Player.State.DODGE and is_equal_approx(player.stamina, stam0)
+	var ok14b: bool = started14b and player.state == Player.State.DODGE and (not player.is_feeding) and player.stamina < stam0
 	if not ok14b:
 		ok = false
-		_verify_log("FAIL: ⑭b 读条中 _try_dodge() 未被拦下/白扣体力（started=%s state=%d 期望≠DODGE(%d)｜体力 %.1f→%.1f 期望不变）" % [
-			str(started14b), int(player.state), int(Player.State.DODGE), stam0, player.stamina])
-	_verify_log("⑭b 读条中 _try_dodge(): state=%d（期望≠DODGE(%d)）｜体力 %.1f→%.1f（期望不变，早退在扣体力之前）%s" % [
-		int(player.state), int(Player.State.DODGE), stam0, player.stamina, "OK" if ok14b else "<<< FAIL"])
-	player._cancel_feeding()
+		_verify_log("FAIL: ⑭b 读条中 _try_dodge() 应打断补给并翻滚（started=%s state=%d 期望==DODGE(%d)｜is_feeding=%s 期望 false｜体力 %.1f→%.1f 期望下降）" % [
+			str(started14b), int(player.state), int(Player.State.DODGE), str(player.is_feeding), stam0, player.stamina])
+	_verify_log("⑭b 读条中 _try_dodge(): state=%d（期望==DODGE(%d)，翻滚打断补给）｜ is_feeding=%s（期望 false）｜ 体力 %.1f→%.1f（期望下降，翻滚真实消耗）%s" % [
+		int(player.state), int(Player.State.DODGE), str(player.is_feeding), stam0, player.stamina, "OK" if ok14b else "<<< FAIL"])
+	player._cancel_feeding()      # 兜底清理（若上方已取消则为 no-op）
 
 	# ---- ⑭c 产品不变量：**只要读条在跑**，任一物理帧 `velocity` 必须 < 1.0（"读条 = 不能位移"）----
 	#   不检查"守卫走没走"这条路径，直接咬不变量本身（独立复核要求的正是这一类"位移洞"）：
