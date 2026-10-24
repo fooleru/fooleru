@@ -3,7 +3,8 @@
 [ext_resource type="Script" path="res://scenes/enemies/Zombie.gd" id="1_zombie"]
 
 [sub_resource type="RectangleShape2D" id="rect_z"]
-size = Vector2(12, 12)
+; R-new：杂兵体积 +50%（碰撞盒 12→18）；Brute 与本类一样大，Splitter(Boss) = 本类×2
+size = Vector2(18, 18)
 
 ; ==== R-93 敌人互不碰撞（围攻感）====
 ; collision_mask = 19 = 31 & ~4 & ~8
@@ -15,7 +16,7 @@ size = Vector2(12, 12)
 ;   依赖 layer，不依赖本 mask。
 [node name="Zombie" type="CharacterBody2D"]
 collision_layer = 4
-collision_mask = 19
+collision_mask = 51   ; R-155: 19(墙1+玩家2+家具16) +32 = b类家具(防弹玻璃)也挡敌人
 script = ExtResource("1_zombie")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="."]

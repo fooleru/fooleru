@@ -111,7 +111,7 @@ const BLOCK_ACTIVE := Color(1.00, 0.95, 0.55, 1.00) # 玩家站上：亮黄（"�
 #   它由 `Main._update_hint` 下发到**屏幕底部 hint 通道**（`scenes/ui/Hint.gd`），
 #   属屏幕空间 UI，不受"世界空间禁止文字"铁律约束。
 #   `PROMPT_KEY` 保留：`_ready()` 用它做「屏幕提示文案含键名 F」的一致性自证。
-const PROMPT_KEY := "depart.prompt"   # ← Loc 表的 key（不是文案本身）
+const PROMPT_KEY := "depart.prompt_select"   # ← Loc 表的 key（不是文案本身）
 
 ## 本瓦片中心的世界坐标（Main 在 `_build_floor` 里设 `position`）
 func tile_pos() -> Vector2:

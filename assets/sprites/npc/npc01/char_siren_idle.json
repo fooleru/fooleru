@@ -1,0 +1,29 @@
+{
+  "file": "char_siren_idle.png",
+  "frame_w": 64,
+  "frame_h": 64,
+  "cols": 4,
+  "rows": 4,
+  "fps": 6,
+  "row_order": [
+    "up",
+    "right",
+    "down",
+    "left"
+  ],
+  "row_label": {
+    "up": "背(上)",
+    "right": "右",
+    "down": "正(下)",
+    "left": "左(镜像)"
+  },
+  "mirror_of": {
+    "left": "right"
+  },
+  "note": "行0=背(上) 行1=右 行2=正(下) 行3=左。左方向由右方向水平镜像生成（同 char_siren_move 的既定妥协：本地 Q4 模型无法稳定产出俯视中间角度）。4帧呼吸循环=中立/吸气上升/顶点/呼气回落，6fps 循环。同方向 seed 与 move 一致（up=8805/down=8810/right=8812），保证两套图集同源。",
+  "seed_per_row": {
+    "up": 8805,
+    "down": 8810,
+    "right": 8812
+  }
+}

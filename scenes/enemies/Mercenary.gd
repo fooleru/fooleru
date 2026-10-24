@@ -48,7 +48,6 @@ var _flash: float = 0.0
 var _stagger: float = 0.0
 var _sense_t: float = 0.0       # 目标重选节流
 # QA N1 修复：空闲（无目标）时不得绕过节流每帧重扫 → 只有"上一帧持有、本帧失效"才强制立即重扫
-var _had_target: bool = false
 var scan_calls: int = 0         # 重扫次数计数（验证探针）
 # R-73 感知 / 脱战探针（供 headless 验证读取）
 var sensed: bool = false
@@ -88,9 +87,11 @@ func _physics_process(delta: float) -> void:
 	# 双轴感知重扫：节流到期 或 **目标刚刚失效** → 重判（空闲期不得每帧重扫，见 QA N1）
 	_sense_t -= delta
 	var target_gone := target == null or not is_instance_valid(target) or target.is_queued_for_deletion()
-	if _sense_t <= 0.0 or (target_gone and _had_target):
+	# ⚠⚠ R-new 修复（与 Zombie.gd 同款死引用窗口，见那边注释）：条件改为
+	#   `(target != null and target_gone)` —— 持有失效目标即重扫；target==null 不触发
+	#   （保"空闲期不每帧全组遍历"的 QA N1 性能约束）。本类各访问点已有守卫，属隐患同步排除。
+	if _sense_t <= 0.0 or (target != null and target_gone):
 		_scan()
-	_had_target = not target_gone
 
 	fire_cd = max(0.0, fire_cd - delta)
 

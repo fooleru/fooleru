@@ -1,265 +1,241 @@
-[gd_scene load_steps=10 format=3 uid="uid://cp1_main_0001"]
+[gd_scene format=3 uid="uid://h75msd7jdkd"]
 
-[ext_resource type="Script" path="res://scripts/main/Main.gd" id="1_main"]
+[ext_resource type="Script" uid="uid://cuhk7pbqgolc5" path="res://scripts/main/Main.gd" id="1_main"]
 [ext_resource type="PackedScene" path="res://scenes/player/Player.tscn" id="2_player"]
 [ext_resource type="PackedScene" path="res://scenes/ui/HUD.tscn" id="3_hud"]
-[ext_resource type="Script" path="res://scenes/ui/Crosshair.gd" id="5_cross"]
-[ext_resource type="Script" path="res://scenes/ui/FloorMap.gd" id="6_floormap"]
-[ext_resource type="Script" path="res://scenes/ui/Backpack.gd" id="7_backpack"]
-[ext_resource type="Script" path="res://scenes/ui/Hint.gd" id="8_hint"]
-[ext_resource type="Script" path="res://scenes/world/FogOverlay.gd" id="9_fog"]
-[ext_resource type="Script" path="res://scenes/ui/ItemMenu.gd" id="10_itemmenu"]
+[ext_resource type="Script" uid="uid://bkpmb3tyllk22" path="res://scenes/ui/Crosshair.gd" id="5_cross"]
+[ext_resource type="Script" uid="uid://bix8ommnh5j1p" path="res://scenes/ui/FloorMap.gd" id="6_floormap"]
+[ext_resource type="Script" uid="uid://dqy65e4gcgpbs" path="res://scenes/ui/Backpack.gd" id="7_backpack"]
+[ext_resource type="Script" uid="uid://6og370vo3211" path="res://scenes/ui/Hint.gd" id="8_hint"]
+[ext_resource type="Script" uid="uid://djdwj4mx4uqrw" path="res://scenes/world/FogOverlay.gd" id="9_fog"]
+[ext_resource type="Script" uid="uid://ypes1842rj8b" path="res://scenes/ui/ItemMenu.gd" id="10_itemmenu"]
 
-[node name="Main" type="Node2D"]
+[node name="Main" type="Node2D" unique_id=1305958921]
 process_mode = 3
 script = ExtResource("1_main")
 
-[node name="Camera" type="Camera2D" parent="."]
+[node name="Camera" type="Camera2D" parent="." unique_id=1115437582]
 process_mode = 1
-ignore_rotation = true
 position_smoothing_enabled = true
 position_smoothing_speed = 8.0
 
-[node name="TestRoom" type="Node2D" parent="."]
+[node name="TestRoom" type="Node2D" parent="." unique_id=894174526]
 process_mode = 1
 
-[node name="FloorVis" type="Node2D" parent="TestRoom"]
+[node name="FloorVis" type="Node2D" parent="TestRoom" unique_id=1900056119]
 
-[node name="Walls" type="Node2D" parent="TestRoom"]
+[node name="Walls" type="Node2D" parent="TestRoom" unique_id=240773848]
 
-[node name="Enemies" type="Node2D" parent="TestRoom"]
+[node name="Enemies" type="Node2D" parent="TestRoom" unique_id=373228758]
 
-[node name="Pickups" type="Node2D" parent="TestRoom"]
+[node name="Pickups" type="Node2D" parent="TestRoom" unique_id=1576269837]
 
-[node name="Furniture" type="Node2D" parent="TestRoom"]
+[node name="Furniture" type="Node2D" parent="TestRoom" unique_id=2066396522]
 
-[node name="ExitMarker" type="Polygon2D" parent="TestRoom"]
+[node name="ExitMarker" type="Polygon2D" parent="TestRoom" unique_id=1269231977]
 position = Vector2(305, 160)
-color = Color(0.95, 0.85, 0.30, 1)
+color = Color(0.95, 0.85, 0.3, 1)
 polygon = PackedVector2Array(-6, -6, 6, -6, 6, 6, -6, 6)
 
-[node name="Player" parent="TestRoom" instance=ExtResource("2_player")]
+[node name="Player" parent="TestRoom" unique_id=864714188 instance=ExtResource("2_player")]
 position = Vector2(60, 688)
 
-[node name="FogLayer" type="CanvasLayer" parent="."]
+[node name="FogLayer" type="CanvasLayer" parent="." unique_id=1097355627]
 process_mode = 1
 layer = 9
 follow_viewport_enabled = true
 
-[node name="FogOverlay" type="Node2D" parent="FogLayer"]
+[node name="FogOverlay" type="Node2D" parent="FogLayer" unique_id=1965140111]
 script = ExtResource("9_fog")
 
-[node name="HUD" parent="." instance=ExtResource("3_hud")]
+[node name="HUD" parent="." unique_id=2073455144 instance=ExtResource("3_hud")]
 
-[node name="DeathScreen" type="CanvasLayer" parent="."]
+[node name="DeathScreen" type="CanvasLayer" parent="." unique_id=315847379]
 process_mode = 1
 layer = 20
 
-[node name="Dimmer" type="ColorRect" parent="DeathScreen"]
+[node name="Dimmer" type="ColorRect" parent="DeathScreen" unique_id=1237528408]
 offset_right = 320.0
 offset_bottom = 180.0
-color = Color(0, 0, 0, 0.7)
 mouse_filter = 2
+color = Color(0, 0, 0, 0.7)
 
-[node name="Center" type="VBoxContainer" parent="DeathScreen"]
+[node name="Center" type="VBoxContainer" parent="DeathScreen" unique_id=1008664703]
 offset_left = 110.0
 offset_top = 70.0
 offset_right = 210.0
 offset_bottom = 130.0
 theme_override_constants/separation = 6
 
-[node name="Label" type="Label" parent="DeathScreen/Center"]
-text = "你死了"
+[node name="Label" type="Label" parent="DeathScreen/Center" unique_id=334996893]
+layout_mode = 2
 theme_override_colors/font_color = Color(0.95, 0.18, 0.18, 1)
 theme_override_font_sizes/font_size = 16
+text = "你死了"
 horizontal_alignment = 1
 
-[node name="RestartButton" type="Button" parent="DeathScreen/Center"]
+[node name="RestartButton" type="Button" parent="DeathScreen/Center" unique_id=1430577862]
 custom_minimum_size = Vector2(100, 24)
-text = "重开"
+layout_mode = 2
 theme_override_font_sizes/font_size = 10
+text = "重开"
 
-[node name="MapLayer" type="CanvasLayer" parent="."]
+[node name="MapLayer" type="CanvasLayer" parent="." unique_id=266616331]
 process_mode = 1
 layer = 15
 
-[node name="FloorMap" type="Node2D" parent="MapLayer"]
+[node name="FloorMap" type="Node2D" parent="MapLayer" unique_id=913770337]
 visible = false
 script = ExtResource("6_floormap")
 
-[node name="BackpackLayer" type="CanvasLayer" parent="."]
+[node name="BackpackLayer" type="CanvasLayer" parent="." unique_id=619074722]
 process_mode = 2
 layer = 12
 
-[node name="Backpack" type="Node2D" parent="BackpackLayer"]
+[node name="Backpack" type="Node2D" parent="BackpackLayer" unique_id=321180282]
 visible = false
 script = ExtResource("7_backpack")
 
-[node name="HintLayer" type="CanvasLayer" parent="."]
+[node name="HintLayer" type="CanvasLayer" parent="." unique_id=2128906704]
 process_mode = 1
 layer = 13
 
-[node name="Hint" type="Node2D" parent="HintLayer"]
+[node name="Hint" type="Node2D" parent="HintLayer" unique_id=64782506]
 script = ExtResource("8_hint")
 
-[node name="MenuLayer" type="CanvasLayer" parent="."]
+[node name="MenuLayer" type="CanvasLayer" parent="." unique_id=928352780]
 process_mode = 2
 layer = 14
 
-[node name="ItemMenu" type="Node2D" parent="MenuLayer"]
+[node name="ItemMenu" type="Node2D" parent="MenuLayer" unique_id=1979127876]
 script = ExtResource("10_itemmenu")
 
-[node name="PauseScreen" type="CanvasLayer" parent="."]
-layer = 30
+[node name="PauseScreen" type="CanvasLayer" parent="." unique_id=1192280236]
 process_mode = 2
+layer = 30
 
-[node name="Dimmer" type="ColorRect" parent="PauseScreen"]
+[node name="Dimmer" type="ColorRect" parent="PauseScreen" unique_id=1211211258]
 offset_right = 320.0
 offset_bottom = 180.0
-color = Color(0, 0, 0, 0.75)
 mouse_filter = 2
+color = Color(0, 0, 0, 0.75)
 
-; R-78：加了 4 行状态 + 1 个按钮后，VBox 内容总高约 164px（已超原先 140px 的容器）→ 容器加高到 168px。
-; R-80：再加 2 行备弹，实测内容总高 **194px**，而视口只有 180px → 底部「退出游戏」被挤出屏幕。
-;   （这是 R-78 那个坑的复发，所以 R-80 的验证里把"内容必须完整落在视口内"固化成断言。）
-;   压缩方案：状态行字号 9→8、separation 3→2、按钮高 20→18、标题 14→13、
-;   并把容器改成 0..180 满高（原来上下各留 6px 的留白在满高时已无必要）。
-; R-89：状态区两列都变成 5 行（行数对齐，见下面的 StatsBox 注释）→ 状态区高度 +1 行。
-;   实测（--verify-loadout2 ③）：整页内容 y = 2..160，**完整落在视口 0..180 内**，余量 20px。
-;   所以**不需要**再压字号或行距 —— 这也是"两列"方案在R-80 之后的第二次红利：
-;   R-80 单列 6 行时总高 194px 曾把底部按钮挤出屏幕，两列化之后加行已经不痛了。
-[node name="Center" type="VBoxContainer" parent="PauseScreen"]
+[node name="Center" type="VBoxContainer" parent="PauseScreen" unique_id=120376667]
 offset_left = 56.0
 offset_top = 2.0
 offset_right = 264.0
 offset_bottom = 178.0
 theme_override_constants/separation = 2
 
-[node name="Label" type="Label" parent="PauseScreen/Center"]
-text = "已暂停"
+[node name="Label" type="Label" parent="PauseScreen/Center" unique_id=1700916673]
+layout_mode = 2
 theme_override_colors/font_color = Color(0.95, 0.96, 0.99, 1)
 theme_override_font_sizes/font_size = 13
+text = "已暂停"
 horizontal_alignment = 1
 
-; R-78：暂停页显示玩家四项状态（当前 / 上限）。刻意用**文字**而不是 HUD 那套色条 ——
-; 暂停是"停下来读信息"的时刻，色条要靠比较，数字是直接可读的。
-[node name="StatsBox" type="GridContainer" parent="PauseScreen/Center"]
+[node name="StatsBox" type="GridContainer" parent="PauseScreen/Center" unique_id=2128522523]
+layout_mode = 2
 theme_override_constants/h_separation = 8
 theme_override_constants/v_separation = 1
 columns = 2
 
-; R-81：GridContainer 是**按子节点顺序先填满一行再换行**，所以下面的声明顺序 =
-;   (生命|备弹) → (体力|9×19) → (饥饿|12×70) → (口渴|空)。
-;   两列后行数 6→4，纵向宽裕了；反过来容器 128→208px（每列 ~104px），
-;   状态行字号 8→9 重新可读，列间 8px 让两列一眼分得开。
-; R-89：左列加「负重」、右列加 5.56 / 7.62 → **两列都变成 5 行**（正好对齐，见下）。
-;   ⚠ 声明顺序必须按"逐行"排（GridContainer 是行优先填充）：
-;     (HpLabel|ReserveTitleLabel) → (StaminaLabel|Reserve9Label) → (HungerLabel|Reserve12Label)
-;   → (ThirstLabel|**Reserve556Label**) → (**LoadLabel**|**Reserve762Label**)
-;   所以下面三个新节点的**声明位置**看着"跳"（Reserve556Label 在 ThirstLabel 之后、
-;   LoadLabel 在 Reserve556Label 之后）—— 这是行优先填充的必然结果，**不是排版错误**。
-;   若把 LoadLabel 声明在 ThirstLabel 之前，它会落到第4 行的左格、把「口渴」挤到右格，
-;   「备弹」表头就与某个口径同行了（R-81 的 c4 断言会当场变红）。
-[node name="HpLabel" type="Label" parent="PauseScreen/Center/StatsBox"]
-text = "生命  -- / --"
+[node name="HpLabel" type="Label" parent="PauseScreen/Center/StatsBox" unique_id=252261308]
+layout_mode = 2
 theme_override_colors/font_color = Color(0.45, 0.92, 0.48, 1)
 theme_override_font_sizes/font_size = 9
+text = "生命  -- / --"
 horizontal_alignment = 1
-mouse_filter = 2
 
-[node name="ReserveTitleLabel" type="Label" parent="PauseScreen/Center/StatsBox"]
-text = "备弹"
+[node name="ReserveTitleLabel" type="Label" parent="PauseScreen/Center/StatsBox" unique_id=1209908679]
+layout_mode = 2
 theme_override_colors/font_color = Color(0.62, 0.65, 0.72, 1)
 theme_override_font_sizes/font_size = 9
+text = "备弹"
 horizontal_alignment = 1
-mouse_filter = 2
 
-[node name="StaminaLabel" type="Label" parent="PauseScreen/Center/StatsBox"]
+[node name="StaminaLabel" type="Label" parent="PauseScreen/Center/StatsBox" unique_id=1344173494]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.5, 0.74, 0.94, 1)
+theme_override_font_sizes/font_size = 9
 text = "体力  -- / --"
-theme_override_colors/font_color = Color(0.50, 0.74, 0.94, 1)
-theme_override_font_sizes/font_size = 9
 horizontal_alignment = 1
-mouse_filter = 2
 
-; R-80：备弹（**每个口径一行**，因为手枪/MP5 共用 9×19、霰弹枪独立 12×70，
-;   只显示当前武器口径就看不到另一口径囤了多少）。斜杠右侧是**该口径的携带上限**。
-[node name="Reserve9Label" type="Label" parent="PauseScreen/Center/StatsBox"]
+[node name="Reserve9Label" type="Label" parent="PauseScreen/Center/StatsBox" unique_id=464078644]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.78, 0.8, 0.86, 1)
+theme_override_font_sizes/font_size = 9
 text = "9×19  -- / --"
-theme_override_colors/font_color = Color(0.78, 0.80, 0.86, 1)
-theme_override_font_sizes/font_size = 9
 horizontal_alignment = 1
-mouse_filter = 2
 
-[node name="HungerLabel" type="Label" parent="PauseScreen/Center/StatsBox"]
+[node name="HungerLabel" type="Label" parent="PauseScreen/Center/StatsBox" unique_id=318253767]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.9, 0.66, 0.34, 1)
+theme_override_font_sizes/font_size = 9
 text = "饥饿  -- / --"
-theme_override_colors/font_color = Color(0.90, 0.66, 0.34, 1)
-theme_override_font_sizes/font_size = 9
 horizontal_alignment = 1
-mouse_filter = 2
 
-[node name="Reserve12Label" type="Label" parent="PauseScreen/Center/StatsBox"]
-text = "12×70  -- / --"
+[node name="Reserve12Label" type="Label" parent="PauseScreen/Center/StatsBox" unique_id=1031218947]
+layout_mode = 2
 theme_override_colors/font_color = Color(0.85, 0.68, 0.45, 1)
 theme_override_font_sizes/font_size = 9
+text = "12×70  -- / --"
 horizontal_alignment = 1
-mouse_filter = 2
 
-[node name="ThirstLabel" type="Label" parent="PauseScreen/Center/StatsBox"]
-text = "口渴  -- / --"
-theme_override_colors/font_color = Color(0.45, 0.80, 0.95, 1)
+[node name="ThirstLabel" type="Label" parent="PauseScreen/Center/StatsBox" unique_id=487514276]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.45, 0.8, 0.95, 1)
 theme_override_font_sizes/font_size = 9
+text = "口渴  -- / --"
 horizontal_alignment = 1
-mouse_filter = 2
 
-; R-89：右列第4 行 —— 5.56（**步枪口径**）。⚠ 本作本次**不加步枪**，
-;   所以这一行会长期显示 "5.56  0 / 180"（用户拍板「只加显示」）。
-;   显示用小数点 `5.56`（行业标准写法），字典键是 `5x56`。
-[node name="Reserve556Label" type="Label" parent="PauseScreen/Center/StatsBox"]
-text = "5.56  -- / --"
+[node name="Reserve556Label" type="Label" parent="PauseScreen/Center/StatsBox" unique_id=844978853]
+layout_mode = 2
 theme_override_colors/font_color = Color(0.72, 0.76, 0.82, 1)
 theme_override_font_sizes/font_size = 9
+text = "5.56  -- / --"
 horizontal_alignment = 1
-mouse_filter = 2
 
-; R-89：左列第 5 行 —— 负重 / 负重上限。⚠ 与其它四行不同，用 `%.1f`（一位小数）
-;   而不是 `%d`：负重是**连续量**且超重判定用的就是这个连续值，整数化会让显示与判定脱节。
-[node name="LoadLabel" type="Label" parent="PauseScreen/Center/StatsBox"]
+[node name="LoadLabel" type="Label" parent="PauseScreen/Center/StatsBox" unique_id=841353436]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.6, 0.66, 0.78, 1)
+theme_override_font_sizes/font_size = 9
 text = "负重  -- / --"
-theme_override_colors/font_color = Color(0.60, 0.66, 0.78, 1)
-theme_override_font_sizes/font_size = 9
 horizontal_alignment = 1
-mouse_filter = 2
 
-; R-89：右列第 5 行 —— 7.62（同 5.56，同为步枪口径，本次也用不满；字典键 `7x62`）。
-[node name="Reserve762Label" type="Label" parent="PauseScreen/Center/StatsBox"]
+[node name="Reserve762Label" type="Label" parent="PauseScreen/Center/StatsBox" unique_id=402390584]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.8, 0.72, 0.62, 1)
+theme_override_font_sizes/font_size = 9
 text = "7.62  -- / --"
-theme_override_colors/font_color = Color(0.80, 0.72, 0.62, 1)
-theme_override_font_sizes/font_size = 9
 horizontal_alignment = 1
-mouse_filter = 2
 
-[node name="Sep" type="Control" parent="PauseScreen/Center"]
+[node name="Sep" type="Control" parent="PauseScreen/Center" unique_id=1873723105]
 custom_minimum_size = Vector2(0, 4)
+layout_mode = 2
 mouse_filter = 2
 
-[node name="ContinueButton" type="Button" parent="PauseScreen/Center"]
+[node name="ContinueButton" type="Button" parent="PauseScreen/Center" unique_id=1579383885]
 custom_minimum_size = Vector2(120, 18)
+layout_mode = 2
+theme_override_font_sizes/font_size = 10
 text = "继续游戏"
-theme_override_font_sizes/font_size = 10
 
-[node name="MapButton" type="Button" parent="PauseScreen/Center"]
+[node name="MapButton" type="Button" parent="PauseScreen/Center" unique_id=1788174497]
 custom_minimum_size = Vector2(120, 18)
+layout_mode = 2
+theme_override_font_sizes/font_size = 10
 text = "显示地图"
-theme_override_font_sizes/font_size = 10
 
-[node name="QuitButton" type="Button" parent="PauseScreen/Center"]
+[node name="QuitButton" type="Button" parent="PauseScreen/Center" unique_id=1718406669]
 custom_minimum_size = Vector2(120, 18)
-text = "退出游戏"
+layout_mode = 2
 theme_override_font_sizes/font_size = 10
+text = "退出游戏"
 
-[node name="CrosshairLayer" type="CanvasLayer" parent="."]
+[node name="CrosshairLayer" type="CanvasLayer" parent="." unique_id=854176706]
 process_mode = 1
 layer = 25
 
-[node name="Crosshair" type="Node2D" parent="CrosshairLayer"]
+[node name="Crosshair" type="Node2D" parent="CrosshairLayer" unique_id=1107599323]
 script = ExtResource("5_cross")

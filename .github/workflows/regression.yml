@@ -1,0 +1,123 @@
+# =============================================================================
+# headless-regression —— 全量 headless 回归（TASKS.md 卡 **E2**）
+#
+# 【为什么挂 CI】本地跑一轮 68 个入口约 15~25 分钟，是本项目**积分消耗大头**。
+#   挂到 GitHub Actions 后用 GitHub 免费额度跑，本地几乎不烧。
+#
+# 【为什么 runs-on = windows-latest】`qa_scratch/run_all_verify.sh` 依赖
+#   Git-Bash + Windows 版 Godot（`tasklist`/`taskkill`/`find -mmin`/`md5sum`），
+#   与本地口径**完全一致**；换 Linux 会引入"两套装判据"的漂移风险。
+#
+# 【路径注入】本机绝对路径在 R-158 改成 `GODOT_BIN` / `PROJ_DIR` 环境变量可覆盖
+#   （不设时取值逐字不变）。CI 用 `cygpath -u` 把 `GITHUB_WORKSPACE` 转成 POSIX 路径后注入。
+#
+# ⚠ **预期入口数**必须与 `run_all_verify.sh` 的 `ENTRIES` 实际条数一致，否则
+#   脚本的 I1 中断检查会报 FAIL（这是刻意的：防止偷偷少跑入口）。
+#   当前 ENTRIES = 72（R-158 核对：唯一入口 72 条、零重复）。
+#   改动入口表时**必须同步改本文件 `EXPECT` 默认值**（两处：input.default 与 env.EXPECT）。
+# =============================================================================
+name: headless-regression
+
+on:
+  push:
+    branches: [main]
+    # 文档/美术素材改动不触发 20 分钟的回归
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'design/**'
+      - 'outputs/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      expect:
+        description: '预期入口数（等于 ENTRIES 实际条数，当前 72）'
+        required: false
+        default: '72'
+      godot_version:
+        description: 'Godot 版本（本地工程用 4.7.2）'
+        required: false
+        default: '4.7.2'
+
+concurrency:
+  group: regression-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GODOT_VERSION: ${{ github.event.inputs.godot_version || '4.7.2' }}
+  EXPECT: ${{ github.event.inputs.expect || '72' }}
+
+jobs:
+  regression:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Godot binary
+        id: cache-godot
+        uses: actions/cache@v4
+        with:
+          path: .ci/godot
+          key: godot-${{ runner.os }}-${{ env.GODOT_VERSION }}
+
+      # Godot 官方 release 资产名：Godot_v<ver>-stable_win64_console.exe.zip
+      # （console 版 = 有 stdout，与本地 `Godot_v4.7.2-stable_win64_console.exe` 同款）
+      - name: Download Godot (win64 console build)
+        if: steps.cache-godot.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:GITHUB_WORKSPACE '.ci\godot'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $zip = Join-Path $dir 'godot.zip'
+          $url = "https://github.com/godotengine/godot/releases/download/$env:GODOT_VERSION-stable/Godot_v$env:GODOT_VERSION-stable_win64_console.exe.zip"
+          Write-Host "downloading: $url"
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          Get-ChildItem -Recurse $dir -Filter '*.exe' | Select-Object -ExpandProperty FullName
+
+      - name: Godot import (warm-up, 让 .import 缓存就位)
+        shell: bash
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          W="$(cygpath -u "$GITHUB_WORKSPACE")"
+          EXE="$W/.ci/godot/Godot_v${GODOT_VERSION}-stable_win64_console.exe"
+          test -f "$EXE" || { echo "FATAL: 未找到 $EXE"; ls -la "$W/.ci/godot"; exit 1; }
+          "$EXE" --headless --path "$W" --import
+          echo "import done"
+
+      - name: Run full headless regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          W="$(cygpath -u "$GITHUB_WORKSPACE")"
+          cd "$W"
+          export PROJ_DIR="$W"
+          export GODOT_BIN="$W/.ci/godot/Godot_v${GODOT_VERSION}-stable_win64_console.exe"
+          echo "PROJ_DIR=$PROJ_DIR"
+          echo "GODOT_BIN=$GODOT_BIN"
+          echo "EXPECT=$EXPECT"
+          bash qa_scratch/run_all_verify.sh "ci-${GITHUB_RUN_NUMBER}" "$EXPECT"
+
+      - name: Print summary
+        if: always()
+        shell: bash
+        run: |
+          W="$(cygpath -u "$GITHUB_WORKSPACE")"
+          S="$W/qa_scratch/ci-${GITHUB_RUN_NUMBER}/regression/summary.txt"
+          if [ -f "$S" ]; then echo "----- summary -----"; cat "$S"; else echo "NO summary at $S"; fi
+
+      - name: Upload regression artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-ci-${{ github.run_number }}
+          path: |
+            qa_scratch/ci-${{ github.run_number }}/regression
+            cp1_dod_log.txt
+          if-no-files-found: warn

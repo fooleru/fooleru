@@ -3,7 +3,8 @@
 [ext_resource type="Script" path="res://scenes/enemies/Brute.gd" id="1_brute"]
 
 [sub_resource type="RectangleShape2D" id="rect_b"]
-size = Vector2(12, 12)
+; R-new：与普通僵尸一样大（碰撞盒 12→18）
+size = Vector2(18, 18)
 
 ; ==== R-146 · 第三种敌人「快速近战型僵尸」====
 ; 【与 Zombie.tscn 的差异 —— 只有两处】

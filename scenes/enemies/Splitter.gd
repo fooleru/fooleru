@@ -64,14 +64,40 @@
 #     而生成节奏是被 `--verify-splitter` 按帧精确断言的，任何时滞都会让断言变脆。
 #
 # 【碰撞体 / 体型】
-#   碰撞盒 24×24 由 `Splitter.tscn` 给出（= 2 × 12 普通僵尸）。
-#   程序化精灵 `EnemyArt` 的 `scale = Vector2(2,2)`（16×16 精灵 → 32×32，
-#   线性 2× = 面积 4×，正好「体型大 4 倍」），在 `_ready()` 里设。
+#   碰撞盒 36×36 由 `Splitter.tscn` 给出（R-new：Boss = 2 × 18 放大后杂兵，面积 4×）。
+#   程序化精灵 `EnemyArt` 的 `scale = Vector2(2,2)`：R-153 后僵尸本体用 64×64 图集 →
+#   本 Boss = 128×128，线性 2× = 面积 4×，正好「体型大 4 倍」，在 `_ready()` 里设。
 extends "res://scenes/enemies/Zombie.gd"
 
 ## 供 headless 验证读取的标记（避免验证脚本靠 class_name 猜类型）。
 ## 与 `Brute.gd` 的 `is_brute` 同款：用布尔标记 + 场景节点名，不用 class_name。
 var is_splitter: bool = true
+
+# R-158 · Boss 阶段（1 / 2）。⚠ **单向**：进入 2 后不退回（见 GameConstants 注释）。
+var _boss_phase: int = 1
+
+# 只读探针：当前阶段（1 / 2）。`--verify-bossphase` 与 HUD 共用这一个口径。
+func splitter_phase() -> int:
+    return _boss_phase
+
+# 只读探针：当前生成周期（秒）——一/二阶段不同，验证脚本直接读它，不反推常量。
+func _cycle_interval() -> float:
+    return GameConstants.SPLITTER_PHASE2_SPAWN_INTERVAL if _boss_phase == 2 else GameConstants.SPLITTER_SPAWN_INTERVAL
+
+# 只读探针：当前每轮连发次数。
+func _burst_count() -> int:
+    return GameConstants.SPLITTER_PHASE2_SPAWN_BURST if _boss_phase == 2 else GameConstants.SPLITTER_SPAWN_BURST
+
+# 只读探针：血条填充色（二阶段换色 = 给玩家的**无文字**阶段信号）。
+func boss_bar_color() -> Color:
+    return GameConstants.SPLITTER_PHASE2_BAR_COLOR if _boss_phase == 2 else PHASE1_BAR_COLOR
+
+# 进入二阶段（**单向**，只从 1 → 2 生效一次）。
+func _enter_phase2() -> void:
+    _boss_phase = 2
+    move_speed = GameConstants.SPLITTER_SPEED * GameConstants.SPLITTER_PHASE2_SPEED_MUL
+    _spawn_cycle_t = _cycle_interval()
+    queue_redraw()
 
 ## 覆写数值（同 Brute）：⚠ 必须在 `_init()` 而非 `_ready()` 里设——
 ##   `@export` 赋值发生在 `_ready()` 之前，而父类 `_ready()` 会 `_scan()`。
@@ -106,11 +132,15 @@ func splitter_spawn_count() -> int:
 
 func _ready() -> void:
     super._ready()
-    # R-149：体型大 4 倍 —— 16×16 精灵 scale 2× = 32×32（线性 2× = 面积 4×）。
+    # R-149→R-new：Boss 比杂兵**大 4 倍**（用户规则）—— = 父类缩放（0.75，64→48）再 **2× = 1.5**
+    #   （64×64 单格 → 96×96 世界占位 = 杂兵 48×48 的面积 4×）。
+    #   ⚠ 父类基准 0.75 是用户 2026-10-22 明确要求（见 `Zombie.gd` 的 `ENEMY_ATLAS_SCALE`）；
+    #     本处 ×2 后为 1.5。历史注释里的「0.375 → 0.75」是过期文字，已于 2026-10-23 更正。
     #   `super._ready()` 末尾 `_refresh_art()` 已把 `EnemyArt` 建出来（纹理到位时）。
     var art := get_node_or_null(ENEMY_ART_NODE) as Sprite2D
     if art != null:
-        art.scale = Vector2(2, 2)
+        art.scale = Vector2(ENEMY_ATLAS_SCALE * 2.0, ENEMY_ATLAS_SCALE * 2.0)
+    queue_redraw()   # R-new：初始画一次头顶血条
 
 func _physics_process(delta: float) -> void:
     super._physics_process(delta)
@@ -142,6 +172,10 @@ func _player_in_sight() -> bool:
 #        玩家重新进视野后走完剩余时间即触发。见文件头「为什么暂停而不是重置」。
 #     ③ 未开周期 且 **看得见**玩家 → 照旧推进 `_spawn_cycle_t`，到点开新周期。
 func _update_spawner(delta: float) -> void:
+    # ---- ⓪ 阶段检查（R-158）：HP 掉到阈值 → 进二阶段。**单向**，且不看视野 ----
+    #   ⚠ 放在最前：保证「任何途径掉血」都能触发（不只 take_damage）。
+    if _boss_phase == 1 and boss_hp_ratio() <= GameConstants.SPLITTER_PHASE2_HP_FRAC:
+        _enter_phase2()
     # ---- ① 本轮已开启：口径②，照旧打完，**完全不看视野** ----
     if _burst_left > 0:
         _burst_gap -= delta
@@ -149,7 +183,7 @@ func _update_spawner(delta: float) -> void:
             _do_burst_spawn()
             _burst_left -= 1
             if _burst_left <= 0:
-                _spawn_cycle_t = GameConstants.SPLITTER_SPAWN_INTERVAL
+                _spawn_cycle_t = _cycle_interval()
             else:
                 _burst_gap = GameConstants.SPLITTER_SPAWN_GAP
         return
@@ -159,7 +193,7 @@ func _update_spawner(delta: float) -> void:
     # ---- ③ 看得见玩家：照旧推进 / 开新周期 ----
     _spawn_cycle_t -= delta
     if _spawn_cycle_t <= 0.0:
-        _burst_left = GameConstants.SPLITTER_SPAWN_BURST
+        _burst_left = _burst_count()
         _burst_gap = 0.0    # 周期触发后**第一次立即生成**
 
 func _do_burst_spawn() -> void:
@@ -169,9 +203,46 @@ func _do_burst_spawn() -> void:
         _minion_spawner.call(kind, global_position)
     _spawned_bursts += 1
 
-## R-149：**覆写**父类的精灵路径 → 本批复用僵尸图，靠 `scale = Vector2(2,2)` 表达「大」。
-##   ⚠ **专用 Boss 图是后续美术批，本批不做**（写在这里是为了将来改图只动这一行）。
-##   ⚠ 返回值与父类相同（`zombie.png`），覆写的意义在于**把"复用僵尸图"这一决定显式化**，
-##     并留下换图的单一改动点（与 `Brute.gd` 覆写 `enemy_sprite_path()` 同一动机）。
+## R-149/R-153：本 Boss **继承**父类（Zombie）的 4 方向图集（`enemy_atlas_prefix()` 返回
+##   `char_zombie`），靠 `scale = 0.75×2 = 1.5` 表达「大」（64×64 单格 → 96×96 世界占位 = 面积 4×）。
+##   ⚠ **专用 Boss 图是后续美术批，本批不做**（将来改图只动 `enemy_atlas_prefix()` 一行）。
+##   ⚠ 下方 `enemy_sprite_path()` 覆写保留为「复用僵尸图」的显式标记（图集模式下该返回值不再被读取，
+##     换独立 Boss 图时改成 `enemy_atlas_prefix()` 返回新前缀即可）。
 func enemy_sprite_path() -> String:
     return ENEMY_SPRITE_DIR + "zombie.png"
+
+# ==== R-new（2026-10-22 用户需求）：「Boss 头顶显示血条」====
+#   · 形状绘制（矩形，非文字）→ 不触发 R-128 世界空间禁文字；随受击 `queue_redraw()` 更新。
+#   · 精灵 48×48（centered，-24..24），血条画在其上方 y=-30，宽 40（略窄于本体）。
+#   · 中国习惯：红 = 血（填充按 hp/max_hp 比例，扣血 → 变短）。
+const HP_BAR_W := 40.0
+const HP_BAR_H := 4.0
+const HP_BAR_Y := -30.0
+# 一阶段血条色（红）。二阶段色 = `GameConstants.SPLITTER_PHASE2_BAR_COLOR`（橙）。
+#   ⚠ 两色必须**明显可辨**：这是玩家判断「Boss 进二阶段」的**唯一**信号（世界空间禁止文字）。
+#   `--verify-bossphase` ② 断言两色不相等。
+const PHASE1_BAR_COLOR := Color(0.86, 0.16, 0.16, 1.0)
+
+## 血条比例（0..1）—— `_draw` 与 `--verify-splitter` 共用同一口径。
+func boss_hp_ratio() -> float:
+    return clampf(hp / maxf(1.0, max_hp), 0.0, 1.0)
+
+func _draw() -> void:
+    var ratio: float = boss_hp_ratio()
+    var x0: float = -HP_BAR_W * 0.5
+    # 外底（黑，略大一圈，提升暗场景可读性）
+    draw_rect(Rect2(x0 - 1.0, HP_BAR_Y - 1.0, HP_BAR_W + 2.0, HP_BAR_H + 2.0), Color(0.0, 0.0, 0.0, 0.75))
+    # 槽（暗红）
+    draw_rect(Rect2(x0, HP_BAR_Y, HP_BAR_W, HP_BAR_H), Color(0.22, 0.06, 0.06, 0.9))
+    # 填充（红，按比例）
+    if ratio > 0.0:
+        draw_rect(Rect2(x0, HP_BAR_Y, HP_BAR_W * ratio, HP_BAR_H), boss_bar_color())
+
+# 受击后刷新血条（父类改 hp → 这里重绘）
+func take_damage(amount: float) -> void:
+    super.take_damage(amount)
+    # R-158：受击后**立即**判阶段（不等下一帧）—— 二阶段必须在玩家看到血条变短的同一刻生效。
+    if _boss_phase == 1 and boss_hp_ratio() <= GameConstants.SPLITTER_PHASE2_HP_FRAC:
+        _enter_phase2()
+    queue_redraw()
+

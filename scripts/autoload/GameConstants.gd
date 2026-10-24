@@ -236,6 +236,10 @@ static func ui_font() -> Font:
 		var sf := SystemFont.new()
 		sf.font_names = PackedStringArray([
 			"Microsoft YaHei", "SimHei", "SimSun", "PingFang SC", "Noto Sans CJK SC", "sans-serif"])
+		# R-new（2026-10-22）：文字清晰度 —— UI 在 320×180 设计空间按 UI_SCALE=2 放大；
+		#   默认字形按 font_size(8) 栅格化成位图后被 ×2 放大 → 发虚（瓦片是矢量所以清楚）。
+		#   设 oversampling=UI_SCALE 让字形直接按 2× 栅格化（8→16px），放大后 1:1 → 清晰锐利。
+		sf.oversampling = float(UI_SCALE)
 		_ui_font_cache = sf
 	return _ui_font_cache
 
@@ -459,6 +463,10 @@ const QUICK_SLOTS := 5        # 底部快捷栏格数（预留位置）
 const CRATE_INTERACT_DIST := 24.0   # 靠近箱子的交互距离
 const CRATE_ITEMS_MIN := 4
 const CRATE_ITEMS_MAX := 10
+# ==== R-new：敌人尸体（2026-10-13 用户需求）====
+#   「敌人死后会留下尸体，里面包含1到3件战利品」→ 每具尸体 1~3 件。
+const CORPSE_LOOT_MIN := 1
+const CORPSE_LOOT_MAX := 3
 
 # ======================================================================
 # ==== R-104：箱子分 4 类，每类只刷新自己那类物品 ====
@@ -508,19 +516,119 @@ const CRATE_TYPES: Dictionary = {
 	#   · 与地面 (0.11,0.11,0.14) 距离 0.53，V=0.80 远高于地面 0.14 → 暗底上很跳
 	"weapon": {"label": "武器箱", "color": Color(0.20, 0.19, 0.80), "items": ["ammo_9x19", "ammo_12x70"]},
 	# 无菌白（急救十字的白底语义）。最近邻 pistol (0.74,0.76,0.84) 距离 0.361。
-	"medical": {"label": "医疗箱", "color": Color(0.98, 0.99, 0.98), "items": ["medkit", "water"]},
+	"medical": {"label": "医疗箱", "color": Color(0.98, 0.99, 0.98), "items": ["medkit", "water", "bandage", "herb", "pharm_raw", "alcohol", "syringe"]},
 	# 暖橙（口粮 / 热量）。最近邻 canned (0.85,0.72,0.30 金) 距离 0.269 = 4 色里最窄的一处，
 	#   但色相差 36°（H36 vs H46），且罐头只在背包右栏出现、不会与箱子同屏竞争注意力。
-	"food": {"label": "食品箱", "color": Color(0.96, 0.61, 0.08), "items": ["meat", "vegetable", "canned", "mre", "coca"]},
+	"food": {"label": "食品箱", "color": Color(0.96, 0.61, 0.08), "items": ["meat", "vegetable", "canned", "mre", "coca", "biscuit", "jerky", "fruit"]},
 	# 亮品红（工业 / 零件感）。最近邻 part (0.72,0.72,0.80) 距离 0.591。
 	#   R-106：`part` 已归入本类（kind:"misc" + 无 use = 纯战利品，与其它材料同性质）。
-	"material": {"label": "材料箱", "color": Color(0.94, 0.19, 0.94), "items": ["powder", "scrap", "plastic", "circuit", "fuel", "cloth", "part"]},
+	"material": {"label": "材料箱", "color": Color(0.94, 0.19, 0.94), "items": ["powder", "scrap", "plastic", "circuit", "fuel", "cloth", "part", "battery", "wood", "nail", "screw", "glue"]},
 }
 # 4 个类型的 id 列表（**数组**而非字典 —— 用途是"按固定顺序遍历 / 等概率抽类型"，
 #   字典的键序在 GDScript 里不保证，抽样必须走这个数组才稳定）。
 # ⚠ 顺序 = 生成器哈希 `index % 4` 的映射顺序，改这个数组会改变**所有种子**的箱子类型分布
 #   （`--verify-cratetype` ⑥ 的确定性断言守得住"两次一致"，但"跨版本一致"不在此列）。别动。
 const CRATE_TYPE_IDS: Array = ["weapon", "medical", "food", "material"]
+
+# ==== R-new 批次说明（2026-10-14 用户需求逐字，重量授权"合理范围内自行决定"）====
+# 【需求逐字】
+#   1. 食品箱添加：压缩饼干（饥饿+30，口渴-10）；肉干（饥饿+20，口渴-5）；水果（饥饿+5，口渴+15）
+#   2. 医疗箱添加：绷带（生命+30）；草药（生命+20，饥饿+20，口渴-10）；
+#      制药原料（材料类，暂时无用）；酒精（材料类，暂时无用）；空注射器（材料类，暂时无用）
+#   3. 材料箱添加：电池；木材；钉子；螺丝；胶水
+# 【池子变化】ITEM_TYPES 16 → 29；四类池 weapon 2 / medical 2→7 / food 5→8 / material 7→12；
+#   并集仍 == ITEM_TYPES 全集（29 件）—— `--verify-cratetype` ⓪②③ 与 `--verify-loot` A 段继续守护。
+# 【⚠ 负 thirst = 本批首次引入的机制（压缩饼干/肉干/草药）】既有恢复全是正值；
+#   负值走同一条 `restore_thirst(负值)` 路径 → 口渴下降（"干粮越吃越渴"），
+#   配套两处改动：① `Player.restore_hunger/restore_thirst` 补**下界**钳制（原先只有 minf 上限，
+#   负值会把生存条打到负数 → HUD 显示负数、归零判定虽仍对但显示难看）；
+#   ② `Main._use_item` 的 `if drink > 0.0:` 门禁会把负值**静默丢弃** → 改 `!= 0.0`。
+#   ⚠ `heal` / `stamina` 的 `> 0.0` 门禁**刻意保留**：负 heal=扣血、负 stamina=扣体力
+#   不在任何用户需求里，不开这个口子（只有 hunger/thirst 有负值设计）。
+# 【重量决定（用户授权范围内，参照既有同档物品）】
+#   压缩饼干 1.0 / 水果 1.0（轻零食）｜肉干 1.2（脱水肉，同蔬菜档）｜
+#   绷带 0.5 / 草药 0.5（轻医疗）｜空注射器 0.2（极轻）｜酒精 2.0（瓶装液体，水 2.5 与口粮 2.5 之间）｜
+#   制药原料 1.5（同火药）｜电池 1.0｜木材 2.5（同废金属）｜钉子 1.0｜螺丝 0.8｜胶水 1.0
+# 【颜色】逐件避开既有相邻色（背包里与色块+文字同显，撞色代价低，仍按可区分原则挑）：
+#   压缩饼干麦色 / 肉干暗红棕 / 水果桃粉 / 绷带暖白 / 草药黄绿 / 制药原料淡紫 /
+#   酒精淡黄白 / 空注射器亮灰蓝 / 电池亮黄 / 木材深褐 / 钉子亮钢灰 / 螺丝暗灰蓝 / 胶水黄绿
+
+# ==== R-155：家具瓦片（按**功能**分 4 档，不是按外观分）====
+# 【四档的物理含义（与现有碰撞层体系严格对齐）】
+#   a = 视线 / 子弹 / 玩家 / 敌人 **都不能穿过** —— 等同**墙壁**：layer 1（LOS 射线只查 layer 1，
+#       所以 a 必然也挡视线）+ NavGrid 置 0。
+#   b = **仅视线能穿过**，其余都挡 —— 如防弹玻璃。⚠ 这需要**新建 layer 32**：
+#       LOS 的 mask 恒为 1（不含 32）→ 视线穿过；但 32 必须加进玩家 / 敌人 / 两种子弹的 mask
+#       （见 Player.tscn / Zombie.tscn / Mercenary.tscn 的 mask 与 Bullet.gd:28）。
+#   c = 视线、子弹能穿过，玩家 / 敌人挡 —— 等同**现有箱子**：layer 16（子弹 mask 7/13 不含 16
+#       → 子弹天然穿过；LOS mask 1 不含 16 → 视线天然穿过）+ NavGrid 置 0。**零改动**。
+#   d = 全部都能穿过 —— 等同**地板**：不建碰撞体、不动 NavGrid，只画精灵（地毯/盆景/马桶/床）。
+# ⚠ `cat` 是**唯一权威分档**，`--verify-furniture` 逐条断言四档的实际物理行为。
+const FURNITURE_TYPES: Array = [
+	# ---- a：等同墙 ----
+	{"id": "pillar",  "cat": "a", "label": "承重柱"},
+	{"id": "locker",  "cat": "a", "label": "储物柜"},
+	{"id": "freezer", "cat": "a", "label": "冷柜"},
+	# ---- b：仅视线穿过 ----
+	{"id": "glass",   "cat": "b", "label": "防弹玻璃"},
+	# ---- c：等同箱子（视线+子弹穿过）----
+	{"id": "fence",   "cat": "c", "label": "铁栅栏"},
+	{"id": "shelf",   "cat": "c", "label": "货架"},
+	{"id": "desk",    "cat": "c", "label": "办公桌"},
+	{"id": "counter", "cat": "c", "label": "吧台"},
+	# ---- d：等同地板 ----
+	{"id": "carpet",  "cat": "d", "label": "地毯"},
+	{"id": "bonsai",  "cat": "d", "label": "盆景"},
+	{"id": "toilet",  "cat": "d", "label": "马桶"},
+	{"id": "bed",     "cat": "d", "label": "双人床"},
+	{"id": "sink",    "cat": "d", "label": "洗手台"},
+	{"id": "stove",   "cat": "d", "label": "灶台"},
+	{"id": "table",   "cat": "d", "label": "餐桌"},
+]
+
+# 家具 id → 分档（**纯查询表**，由上面数组派生；`Furniture.gd` / 生成器 / 闸门共用同一份，
+#   避免三处各写一份映射而漂移）。
+static func furniture_cat(id: String) -> String:
+	for f in FURNITURE_TYPES:
+		if String(f.get("id", "")) == id:
+			return String(f.get("cat", ""))
+	return ""
+
+# ==== R-155：房间主题（每个小房间一个主题，摆对应家具）====
+# 结构：theme → { "label", "furn": [家具 id...] }；`furn` 内重复出现 = 权重更高。
+# ⚠ 主题只决定**摆什么**，不决定碰撞 —— 碰撞一律由该家具的 `cat` 决定（见上）。
+const ROOM_THEMES: Dictionary = {
+	"bathroom":   {"label": "卫生间", "furn": ["toilet", "toilet", "sink", "sink", "carpet"]},
+	"kitchen":    {"label": "厨房",   "furn": ["stove", "stove", "sink", "counter", "shelf", "freezer"]},
+	"restaurant": {"label": "餐厅",   "furn": ["table", "table", "table", "bonsai", "counter", "carpet"]},
+	"bedroom":    {"label": "卧室",   "furn": ["bed", "bed", "locker", "carpet", "bonsai"]},
+	"office":     {"label": "办公室", "furn": ["desk", "desk", "shelf", "glass", "bonsai", "carpet"]},
+	"warehouse":  {"label": "仓库",   "furn": ["shelf", "shelf", "shelf", "fence", "pillar", "freezer"]},
+	"lobby":      {"label": "大厅",   "furn": ["carpet", "carpet", "bonsai", "glass", "table", "pillar"]},
+}
+const ROOM_THEME_IDS: Array = ["bathroom", "kitchen", "restaurant", "bedroom", "office", "warehouse", "lobby"]
+
+# ==== R-new（2026-10-22）：房间主题 → 允许的箱子种类（用户需求逐字）====
+# 「修改箱子生成逻辑，改为基于房间类型控制可生成的箱子种类。需要建立房间类型与
+#   箱子类型的匹配规则：例如，医药箱仅允许在病房、卫生间等指定房间生成，
+#   其他房间类型应映射到各自允许的箱子类型。」
+# 【规则表语义】主题 → **允许**的 crate kind 数组（值域 ⊆ CRATE_TYPE_IDS）。
+#   生成器给每个箱子定类型时，先看它在哪个主题的房间里，只在该主题允许的
+#   种类里选；不在任何房间内（走廊等）或主题未登记 → 走**默认策略**。
+# 【默认策略 = CRATE_TYPE_IDS（全部 4 类）】—— 未匹配不等于"没箱子"，
+#   而是"不限制种类"（与旧行为逐字一致，保证走廊/大厅不出现规则真空）。
+# ⚠ 规则**刻意不放权重**：同一房间内多个箱子靠 `index` 哈希区分种类，
+#   保持"同种子两次生成逐字节一致"（--verify-cratetype ⑥ 守这条）。
+const ROOM_THEME_CRATE_RULES: Dictionary = {
+	"bathroom":   ["medical"],                          # 卫生间 → 只出医疗箱
+	"kitchen":    ["food"],                             # 厨房   → 只出食品箱
+	"restaurant": ["food"],                             # 餐厅   → 只出食品箱
+	"bedroom":    ["medical", "food"],                  # 卧室   → 补给类
+	"office":     ["weapon", "material"],               # 办公室 → 器材/耗材
+	"warehouse":  ["material", "weapon"],               # 仓库   → 材料/军械
+	# "lobby"（大厅）**刻意不登记** → 走默认策略（全部 4 类）：
+	#   大厅是每层必经的中枢，全种类才配得上"通用"。
+}
 
 # 【4 个颜色的两两 RGB 欧氏距离（理论上限 √3 ≈ 1.732）—— 实测值，逐字钉在 --verify-cratetype ④】
 #   weapon-medical 1.132 │ weapon-food 1.128 │ weapon-material 0.753
@@ -670,8 +778,8 @@ const AMMO_BOX_WEIGHT := 4.0
 # 【数值来源 = 用户拍板，不是推导值】
 #   用户原话：「按住R键0.5秒后，玩家自动从背包中取出当前武器的弹药盒补充备弹，
 #   每补充1个弹药盒要耗费3秒读条时间，读条期间玩家不能移动，不能开火。」
-#   → `FEED_HOLD_TIME = 0.5`（按住 0.5s 才算「长按=补给」）与 `FEED_BOX_TIME = 3.0`
-#     （每盒读条 3 秒）都是用户**逐字指定**的，不得随手调；下面注释只解释"为什么这个
+#   → `FEED_HOLD_TIME = 0.5`（按住 0.5s 才算「长按=补给」）与 `FEED_BOX_TIME = 2.0`
+#     （每盒读条 2 秒）原为逐字指定的 3.0，R-new 起改 2.0（用户拍板"两个读条都 2s"）；下面注释只解释"为什么这个
 #     方向成立"，**不用来反推数值**。
 # 【为什么这两个常量必须放在 GameConstants 而不是 Player.gd】
 #   ① 它们是**玩法数值**（手感 / 平衡），与同段的 `AMMO_BOX_WEIGHT` / `AMMO_BOX_ROUNDS`
@@ -680,10 +788,11 @@ const AMMO_BOX_WEIGHT := 4.0
 #      若散在 Player.gd 里，测试就得再抄一份数字（正是 R-100 教训：期望值不能反推）。
 # 【⚠ 与 AMMO_BOX_ROUNDS 的关系】
 #   `FEED_BOX_TIME` 是「**每个盒子**的读条时长」，与盒里装几发（9×19=50 / 12×70=24）无关 ——
-#   即"补一个大盒和一个小盒花的时间一样"。这是用户口径（「每补充1个弹药盒要耗费3秒」），
+#   即"补一个大盒和一个小盒花的时间一样"。（原用户口径「每补充1个弹药盒要耗费3秒」，R-new 改为 2s）
 #   不要因为它与发数不成比例就擅自改成"按发数计时"。
 const FEED_HOLD_TIME := 0.5    # 按住 R 多久算「长按=补给」（短于它 → 松开时按普通换弹）
-const FEED_BOX_TIME := 3.0     # 每个弹药盒的读条时长（秒）
+const FEED_BOX_TIME := 2.0     # 每个弹药盒的读条时长（秒）· R-new: 3.0→2.0（用户拍板"两个读条都 2s"）
+const ITEM_USE_TIME := 2.0     # R-new: 消耗品使用读条时长（秒）· 与补给读条统一 2s
 
 const RESERVE_BAR_MAX := 200         # HUD 备弹条满格参考（仅显示用，**不是**上限）
 
@@ -845,6 +954,23 @@ const ITEM_TYPES: Array = [
 	{"id": "vegetable", "label": "蔬菜", "weight": 1.2, "color": Color(0.52, 0.76, 0.38), "kind": "misc", "w": 1, "h": 1},
 	{"id": "meat", "label": "肉类", "weight": 1.5, "color": Color(0.78, 0.42, 0.40), "kind": "misc", "w": 1, "h": 1},
 	{"id": "fuel", "label": "燃料", "weight": 2.8, "color": Color(0.66, 0.52, 0.24), "kind": "misc", "w": 1, "h": 1},
+	# ==== R-new：三类箱子各添加新生成物品（用户 2026-10-14 需求逐字，重量授权自行决定）====
+	# 食品箱 +3（**负 thirst 是本批首次引入的机制**，见 Player.restore_thirst 与 Main._use_item 的配套改动）：
+	{"id": "biscuit", "label": "压缩饼干", "weight": 1.0, "color": Color(0.76, 0.62, 0.38), "kind": "consumable", "w": 1, "h": 1, "use": {"hunger": 30.0, "thirst": -10.0}},
+	{"id": "jerky", "label": "肉干", "weight": 1.2, "color": Color(0.52, 0.28, 0.24), "kind": "consumable", "w": 1, "h": 1, "use": {"hunger": 20.0, "thirst": -5.0}},
+	{"id": "fruit", "label": "水果", "weight": 1.0, "color": Color(0.95, 0.60, 0.70), "kind": "consumable", "w": 1, "h": 1, "use": {"hunger": 5.0, "thirst": 15.0}},
+	# 医疗箱 +5：两件 consumable（有 use）+ 三件 misc（用户逐字"材料类，暂时无用"）
+	{"id": "bandage", "label": "绷带", "weight": 0.5, "color": Color(0.92, 0.90, 0.82), "kind": "consumable", "w": 1, "h": 1, "use": {"heal": 30.0}},
+	{"id": "herb", "label": "草药", "weight": 0.5, "color": Color(0.55, 0.68, 0.30), "kind": "consumable", "w": 1, "h": 1, "use": {"heal": 20.0, "hunger": 20.0, "thirst": -10.0}},
+	{"id": "pharm_raw", "label": "制药原料", "weight": 1.5, "color": Color(0.70, 0.60, 0.85), "kind": "misc", "w": 1, "h": 1},
+	{"id": "alcohol", "label": "酒精", "weight": 2.0, "color": Color(0.78, 0.82, 0.70), "kind": "misc", "w": 1, "h": 1},
+	{"id": "syringe", "label": "空注射器", "weight": 0.2, "color": Color(0.88, 0.90, 0.94), "kind": "misc", "w": 1, "h": 1},
+	# 材料箱 +5（照 R-82 先例：纯战利品，misc + 无 use）
+	{"id": "battery", "label": "电池", "weight": 1.0, "color": Color(0.95, 0.75, 0.20), "kind": "misc", "w": 1, "h": 1},
+	{"id": "wood", "label": "木材", "weight": 2.5, "color": Color(0.50, 0.38, 0.24), "kind": "misc", "w": 1, "h": 1},
+	{"id": "nail", "label": "钉子", "weight": 1.0, "color": Color(0.68, 0.70, 0.73), "kind": "misc", "w": 1, "h": 1},
+	{"id": "screw", "label": "螺丝", "weight": 0.8, "color": Color(0.48, 0.52, 0.58), "kind": "misc", "w": 1, "h": 1},
+	{"id": "glue", "label": "胶水", "weight": 1.0, "color": Color(0.75, 0.80, 0.45), "kind": "misc", "w": 1, "h": 1},
 ]
 # 可装备：武器（R-71）——物品形态与战斗形态共用同一个 id（Player._make_weapon(id)）
 # ⚠⚠ **R-88 ·「霰弹枪」是类别名，不是型号名**（用户澄清：MP 133 只是霰弹枪的一种，后续还会加别的）。
@@ -956,7 +1082,34 @@ const FACTION_MERC := 2      # 雇佣兵阵营
 const FOG_UNEXPLORED := 0
 const FOG_EXPLORED := 1
 const FOG_VISIBLE := 2
-const FOG_VISION_RADIUS_TILES := 10   # 视野半径（格）= 160px（fog-of-war §3.2，⚠ 待实测校准压迫感）
+# ⚠⚠ R-new（2026-10-22 用户需求「玩家迷雾可见半径提升20%」）：10 → **12**（+20%，192px）。
+#
+# 【两个参数必须分清（本次需求的核心口径）】
+#   · `FOG_VISION_RADIUS_TILES`（本参数）= **迷雾 LOS 可见半径** —— 玩家能"点亮"多远的
+#     地形/小地图/大地图。它**不影响屏幕显示范围**。
+#   · 主视图显示范围 = `Camera2D.zoom`（ scenes/Main.tscn 显式钉 **1.0**）× 视口
+#     640×360 → 屏幕恒显示 40×22.5 格世界区域。**本半径改动一个像素都不碰它。**
+#   ⇒ 扩大半径的效果 = 屏幕外的周边先被点亮（小地图/大地图信息更全），
+#     而屏幕里看到的格子数量、瓦片像素尺寸**完全不变**。
+#
+# 【为什么不连带改 Camera2D.zoom】用户明确「保持主视图画面表示范围不变」——
+#   若把 zoom 也调小，640×360 视口会显示更多世界区域，UI 布局假设（320×180 设计
+#   空间）、出口/交互的世界距离判定全部要重校。两个旋钮分离，各管一件事。
+const FOG_VISION_RADIUS_TILES := 12   # 视野半径（格）= 192px（+20%，R-new 2026-10-22）
+
+# ==== R-new（2026-10-22）：右键瞄准「探图」====
+# 玩家右键瞄准时，准星所在格（及周围 `AIM_REVEAL_RADIUS_TILES` 圈）升为「已探索」
+#   （地形记忆，不要求此刻可见）→ 玩家可用右键瞄准来探索地图。
+# ⚠ 这是**独立于**正常视野半径的探索：准星常落在视野半径之外，故必须单独揭示。
+#   揭示语义 = `FogGrid.reveal_radius`（只升不降、无视遮挡），与 V 键扫描同款。
+const AIM_REVEAL_RADIUS_TILES := 1    # 准星探图半径（格）：1 = 3×3 小范围，避免一瞄就暴露大块地图
+
+# ==== R-new（2026-10-22）：视野边缘软过渡（可见圈 → 已探索的自然衔接）====
+# 可见圈（r）外侧 `FOG_EDGE_FADE_TILES` 环内，黑罩 alpha 从 ~0 线性增到
+#   `FOG_EDGE_FADE_ALPHA`（= 已探索压暗值）⇒ 渲染序列：可见(0) → 过渡环 → 已探索(0.55)。
+# ⚠ 过渡环带 **LOS 门控**（墙后不亮）——保持迷雾的遮挡语义，软的是亮度不是信息。
+const FOG_EDGE_FADE_TILES := 2
+const FOG_EDGE_FADE_ALPHA := 0.55
 # 世界迷雾覆盖层所属独立 CanvasLayer 层级：高于世界(默认 0)、低于 HUD(10)
 const FOG_LAYER_INDEX := 9
 # 已探索压暗强度（art-bible §6 R-22：保色相、仅压亮度 ×0.45 → 黑覆盖 alpha = 1 − 0.45 = 0.55）
@@ -980,7 +1133,7 @@ const FOG_EXPLORED_DIM_ALPHA := 0.55
 #   造一个全局时钟会牵连饥饿/口渴/体力衰减（R-91/R-92/R-103）——
 #   那是平衡改动，超出本需求范围，且极易出回归。故只做局部刻度。
 const TRACE_COOLDOWN_GAME_SECONDS := 3600.0   # 1 游戏小时（用户拍板的原始时长）
-const TRACE_TIME_SCALE := 20.0                # 1 现实秒 = 20 游戏秒 -> 3600/20 = 180 现实秒
+const TRACE_TIME_SCALE := 120.0                # 1 现实秒 = 120 游戏秒 -> 3600/120 = 30 现实秒（R-new: 用户要求 V 现实冷却 30s）
 const TRACE_MARK_DURATION := 5.0              # 标记持续 5 秒（**现实秒**，不是游戏秒）
 const TRACE_BLINK_PERIOD := 0.45# 闪烁半周期（秒）：5 / 0.45 ~= 11 次，不刺眼
 const TRACE_MAX_MARKS := 3                    # 最近的 3 个（用户拍板）
@@ -1032,6 +1185,22 @@ const TRACE_CRATE_MARK_SIZE := 6.0      # 宝箱彩色方块边长（px）
 #     站上出发瓦片 → 弹「是否出发」确认框；靠近箱子 → 开箱。两者按位置互斥：
 #     出发瓦片长在第 100 层基地中央通道，箱子在储藏室/起始房间，玩家不会同时
 #     站上瓦片又贴脸箱子。`Main._unhandled_input` 的 KEY_F 分支先判出发、再判开箱。
+# ==== R-new（2026-10-19）：640×360 实装 + UI 缩放 ====
+# 视口 320×180 → 640×360（世界视野翻倍）。屏幕空间 UI（HUD/背包/提示/面板/按钮/
+#   小地图/暂停页/死亡屏/楼层面板）整体 scale=2 铺满新视口 —— 几何常量仍按 320×180
+#   设计空间书写（改一处缩放系数全线生效），鼠标命中经各节点 canvas 变换逆自动适配。
+# ⚠ **世界空间内容绝不缩放**：敌人/箱子/地板/战争迷雾/出发瓦片都在世界坐标系，
+#   视口变大只是"看得更多"，它们的世界尺寸不变。
+const UI_SCALE := 2.0
+
+# ==== R-new（2026-10-21）：UI **设计空间**基准 ====
+# 所有屏幕空间 UI（HUD/背包/地图/按钮…）的坐标都按 320×180 **设计空间**书写，
+#   实际视口 640×360 靠 `UI_SCALE` 整体放大（Main._apply_ui_scale）。
+# ⇒ **换分辨率只需改 project.godot 的 viewport + UI_SCALE**，UI 布局比例自动保持；
+#   任何"要按真实视口算"的 UI（如 M 大地图居中）必须用这两个常量换算回去。
+const DESIGN_W := 320.0
+const DESIGN_H := 180.0
+
 const DEPART_KEY_LABEL := "F"          # 提示与文案里显示的键名（纯英文大写单字符）
 # 瓦片几何（**全部字面量**，禁止从别处推导 —— R-96 教训）
 const DEPART_TILE_RADIUS := 18.0# 站上判定半径(px)。> 瓦片半宽 8px，容得下"踩上去"的误差
@@ -1070,6 +1239,24 @@ const BASE_STORAGE_CRATE_TILE_Y := 28     # 储物箱网格左上角 tile y
 const BASE_START_CRATE_TILE_X := 36       # 起始房间宝箱 tile x（A 标签 35 右侧一格，房间内）
 const BASE_START_CRATE_TILE_Y := 15       # 起始房间宝箱 tile y（与 A 标签同行）
 const BASE_START_CRATE_PRESET := ["pistol", "ammo_9x19"]   # 起始宝箱固定内容（每局刷新）
+# ==== R-new（2026-10-22）：基地双人床「睡觉回血」====
+# 【用户需求逐字】「在双人床旁按 F 加满玩家 hp，根据恢复的 hp 扣减相应比例的饥渴值。」
+#   床旁按 F → heal 回满 HP；按 frac=回血量/max_hp 扣饥渴（restore_hunger/thirst 支持负值+钳[0,MAX]）。
+#   成本锚：满治愈（0→max_hp）**各扣 100**（用户 2026-10-22 拍板「各扣100」= 整条饥渴条，HUNGER/THIRST_MAX=100）；
+#   回多少血同比例缩放（回一半 → 各扣 50）。基地 time_frozen → 成本是干净的一次性扣除（无衰减抵消）。
+const BED_HUNGER_COST_FULL := 100.0   # 满治愈扣饥饿
+const BED_THIRST_COST_FULL := 100.0   # 满治愈扣口渴
+# 床落点：起始房间空地 (33,15)。固定箱在 (36,15)，相距 48px > 2×交互半径(24) → 床/箱交互区不重叠。
+const BED_TILE_X := 33
+const BED_TILE_Y := 15
+const BED_INTERACT_DIST := 24.0       # 床交互半径（与 CRATE_INTERACT_DIST 同口径）
+# ==== R-new（2026-10-22）：基地 NPC1（对话系统）====
+# 立绘 = assets/sprites/portraits/npc01.png（用户 2026-10-22 提供，源自 2026-10-11 资产目录并入）。
+# 世界空间实体 = 简易人形（暂无专属世界 sprite；立绘只在对话框里出）。交互走 F（_try_npc）。
+const NPC_TILE_X := 38               # NPC1 落点 tile x（起始房固定箱 36,15 右侧，与床分居箱两恻）
+const NPC_TILE_Y := 15
+const NPC_INTERACT_DIST := 24.0      # NPC 交互半径（与 CRATE/BED 同口径）
+const NPC_ID := "npc01"              # 对话表键（NpcDialog.DIALOGS）
 # R-120：储物箱存档路径（Godot user 目录，跨运行持久）。存 25 个箱子的物品 id 列表。
 const BASE_STORAGE_SAVE_PATH := "user://base_storage_save.json"
 
@@ -1148,6 +1335,20 @@ const SPLITTER_SPAWN_INTERVAL := 2.0    # 生成周期（秒）
 const SPLITTER_SPAWN_BURST := 5         # 每周期连续生成次数
 const SPLITTER_SPAWN_GAP := 0.1         # 每次间隔（秒）
 const SPLITTER_SPAWN_TYPES := ["zombie", "brute"]   # 每次生成 1 普通 + 1 快速（每周期 10 只）
+
+# ==== R-158 · Boss 第二阶段（TASKS 卡 B2 / cp2 草案 P1）====
+#   【需求】「第二阶段触发条件 + 行为**可配**」→ 全部常量化：调平衡只改本段，不动 `Splitter.gd`。
+#   【触发】HP 比例 ≤ `SPLITTER_PHASE2_HP_FRAC` → 进入二阶段。
+#   【单向】进入后**不退回**（HP 回升也不回一阶段）：双向会让「回血后变弱」读起来像 bug。
+#     检查写在 `_update_spawner` 顶部（每帧）+ `take_damage`（立即），两条路径都覆盖。
+#   【为什么用「生成节奏 + 移速」而不是「加新攻击」】分裂怪的用户设定是**永不攻击**
+#     （`attack_range = 0`，R-149 拍板）。二阶段若给它攻击 = 推翻既有口径 ——
+#     所以压力只从「刷得更凶 + 追得更快」这条既有轴上升：语义不变、量级翻倍。
+const SPLITTER_PHASE2_HP_FRAC := 0.5           # HP 降到 50% 触发（单向，不回退）
+const SPLITTER_PHASE2_SPAWN_INTERVAL := 1.0    # 周期 2.0 → 1.0（压力翻倍）
+const SPLITTER_PHASE2_SPAWN_BURST := 8         # 每轮 5 → 8 次（每周期 16 只，原 10 只）
+const SPLITTER_PHASE2_SPEED_MUL := 1.5         # 移速 22.5 → 33.75（仍 < 玩家走路 80）
+const SPLITTER_PHASE2_BAR_COLOR := Color(0.95, 0.42, 0.10, 1.0)  # 血条 红→橙（纯形色，无文字，合规 R-128）
 
 # ==== R-146 · 敌人出生点徘徊（用户逐字）====
 #   「增加敌人徘徊的行为。敌人有一半的时间会在出生点附近徘徊。」

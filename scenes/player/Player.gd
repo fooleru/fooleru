@@ -17,6 +17,7 @@ signal thirst_changed(v: float, max_v: float)   # R-77：口渴
 signal weapon_changed(label: String)
 # R-144：弹药盒补给读条进度（给 Main 走 toast 通道用；Player 自己不写字）
 signal feed_progress(done: int, active: bool, rounds: int)
+signal use_progress(done: int, active: bool)   # R-new: 消耗品使用读条进度（done=1 完成 / active=读条中）
 
 enum State { IDLE, WALK, SPRINT, DODGE, DEAD }
 
@@ -90,6 +91,9 @@ var aim_dir: Vector2 = Vector2.RIGHT
 # 【默认④】读条 = 玩家身上的**形状**进度条（`FeedBar.gd`，世界空间禁止文字的 R-128 铁律）
 #   + HUD 提示通道的**文字**（toast，由 Main 接 `feed_progress` 信号显示）。
 var is_feeding: bool = false        # 是否正在补给读条
+var is_using: bool = false         # R-new：是否正在「使用物品」读条（消耗品）
+var use_t: float = 0.0             # R-new：使用读条剩余时长
+var _use_apply: Callable = Callable()   # R-new：读条到点回调（Main._use_item(it,list,idx)）
 var feed_t: float = 0.0             # 当前这一盒的剩余读条秒数（从 FEED_BOX_TIME 递减到 0）
 var feed_caliber: String = ""       # 本次补给锁定的口径（换枪改口径 → 自愈式取消）
 var _r_hold_t: float = 0.0          # R 键已按住时长（判定短按 / 长按）
@@ -262,7 +266,7 @@ func _physics_process(delta: float) -> void:
 	#   ⚠ 必须在**采集输入之后、FSM 之前**清零：后面 FSM 见 `input_dir == ZERO` 自然走
 	#     IDLE → `velocity.move_toward(ZERO, ...)` 自然刹停，**不需要**再改速度分支。
 	#   ⚠ 同时覆盖 `_remote_move`（无头驱动）与真实 WASD 两条路径 —— 放在这里两者都截断。
-	if is_feeding:
+	if is_feeding or is_using:
 		input_dir = Vector2.ZERO
 	var wants_sprint := Input.is_physical_key_pressed(KEY_SHIFT)
 
@@ -350,11 +354,17 @@ func _try_dodge() -> void:
 	if is_feeding:
 		_cancel_feeding()
 		_r_long_fired = true
-	if stamina < GameConstants.DODGE_STAMINA_COST:
-		return
+	if is_using:               # R-new：使用读条也可被翻滚打断（物品不消耗）
+		_cancel_using()
+	# R-new【基地不耗体力】：基地（`time_frozen` = 第 100 层）内翻滚**不耗体力**、
+	#   且**体力为零也能翻**（用户需求②）。战斗层仍按原门禁 + 原消耗。
+	if not time_frozen:
+		if stamina < GameConstants.DODGE_STAMINA_COST:
+			return
 	state = State.DODGE
 	dodge_timer = GameConstants.DODGE_DURATION
-	stamina = max(0.0, stamina - GameConstants.DODGE_STAMINA_COST)
+	if not time_frozen:
+		stamina = max(0.0, stamina - GameConstants.DODGE_STAMINA_COST)
 	var dir := input_dir if input_dir.length() > 0.1 else Vector2.DOWN
 	dodge_velocity = dir.normalized() * GameConstants.DODGE_SPEED
 	stamina_changed.emit(stamina, max_stamina)
@@ -383,6 +393,7 @@ func _update_weapon(delta: float) -> void:
 	# R-144：补给读条推进。**只在这里调一次**（本函数每物理帧跑一次）——
 	#   与开火冷却 / 散射恢复同一时基 → headless 可用物理帧数精确复现「每盒恰好 3.0s」。
 	_update_feeding(delta)
+	_update_using(delta)   # R-new：消耗品使用读条推进
 	if is_reloading:
 		reload_t -= delta
 		if reload_t <= 0.0:
@@ -406,6 +417,16 @@ func _update_weapon(delta: float) -> void:
 	#   避免"强制瞄准"与"跟随鼠标"两条路径漏掉一条（那正是这个 bug 的形状）。
 	_sync_weapon_facing()
 
+# ==== R-new【停止射击】：显式清掉扳机状态（UI 打开时由 Main 调用）====
+# 【bug 根因】`_trigger_held`（连发按住状态）原本**只**由鼠标「松开」事件清零（见 `_input`）。
+#   一旦在按住左键期间打开背包/箱子/地图/暂停，鼠标「松开」事件会落在 UI 的输入链路里
+#   （Main._input 对背包可见时的左键 `set_input_as_handled()`），Player 收不到 →
+#   `_trigger_held` 残留 true → 关掉界面后 `_update_weapon` 每帧继续 `fire()`（自动武器永不停火）。
+# 【修法】不依赖"一定收得到松开事件"，改成**开 UI 的那一刻主动清零**（幂等，多调无害）。
+func stop_firing() -> void:
+	_trigger_held = false
+	_trigger_edge = false
+
 func fire() -> void:
 	# R-144【不能开火】：补给读条期间不能开火（用户拍板）。
 	#   与 `is_reloading` 同一道门 —— 都是"手上的动作被占用"，语义一致。
@@ -418,6 +439,8 @@ func fire() -> void:
 	if is_feeding:
 		_cancel_feeding()
 		_r_long_fired = true
+	if is_using:               # R-new：使用读条也可被射击打断（物品不消耗）
+		_cancel_using()
 	var w: Dictionary = weapons[weapon_index]
 	ammo -= 1
 	ammo_list[weapon_index] = ammo
@@ -598,6 +621,8 @@ func start_feeding() -> bool:
 		return false
 	if is_feeding:                     # 已在补给中 → 不重复触发
 		return false
+	if is_using:                      # R-new：正在使用物品 → 不补给
+		return false
 	if weapons.is_empty():             # 空手没有"当前武器口径"
 		return false
 	if is_reloading:                   # 换弹中不能补给（手上的动作被占用）
@@ -634,7 +659,7 @@ func _r_key_step(delta: float, held: bool) -> void:
 			_r_long_fired = true
 			# ⚠ 已在补给中：本处长按**不重复触发**，也**不回落换弹** ——
 			#   玩家正在读条，再按住 R 不该把读条打断成换弹（那不是"死键"：补给正在进行）。
-			if is_feeding:
+			if is_feeding or is_using:
 				return
 			if not start_feeding():
 				# 工程侧决定（**非用户拍板**）：长按却补不了（无该口径的盒 / 池已满 / 正在换弹 / 死亡）
@@ -643,7 +668,7 @@ func _r_key_step(delta: float, held: bool) -> void:
 	else:
 		# 松开：短按（按住时长 > 0 且从未触发长按）→ 按普通换弹（**与原电平轮询行为一致**）。
 		#   ⚠ 已在补给中时不触发换弹：否则"读条中轻点一下 R"会边读条边换弹。
-		if _r_hold_t > 0.0 and not _r_long_fired and not is_feeding:
+		if _r_hold_t > 0.0 and not _r_long_fired and not is_feeding and not is_using:
 			start_reload()
 		_r_hold_t = 0.0
 		_r_long_fired = false
@@ -701,6 +726,50 @@ func _cancel_feeding() -> void:
 	is_feeding = false
 	feed_t = 0.0
 	feed_caliber = ""
+	_hide_feed_bar()
+
+# ==== R-new：消耗品「使用读条」（与补给读条同款：定身 + 头顶形状进度条 + 可被射击/翻滚打断）====
+# 【与补给读条的分工】补给（start_feeding）= 长按 R 按口径补弹药盒；本频道 = 用消耗品，由 Main
+#   在 UI 触发（_begin_use_item：先关背包解暂停，再进本频道）。两者互斥（start_* 互相挡）。
+# 【完成动作为何用回调】Player 不持物品表（_inv 在 Main）—— 读条到点要"应用效果+从背包移除"，
+#   只能回调 Main._use_item（与 set_feed_provider 同款分层）。【打断不消耗】fire/_try_dodge 里
+#   _cancel_using()（回调不触发）→ 物品留在背包。
+func start_using(apply_cb: Callable) -> bool:
+	if state == State.DEAD or state == State.DODGE:
+		return false
+	if is_feeding or is_using or is_reloading:
+		return false
+	if not apply_cb.is_valid():
+		return false
+	is_using = true
+	use_t = GameConstants.ITEM_USE_TIME
+	_use_apply = apply_cb
+	use_progress.emit(0, true)
+	return true
+
+# 每物理帧推进使用读条（在 _update_weapon 里调，紧邻 _update_feeding）。
+func _update_using(delta: float) -> void:
+	if not is_using:
+		return
+	if state == State.DEAD:
+		_cancel_using()
+		return
+	use_t -= delta
+	if use_t > 0.0:
+		_update_feed_bar(1.0 - use_t / GameConstants.ITEM_USE_TIME)   # 复用补给那条形状进度条
+		use_progress.emit(0, true)     # 每帧重发 → Main 的"使用中…"整段读条常驻
+		return
+	use_t = 0.0
+	_update_feed_bar(1.0)
+	if _use_apply.is_valid():
+		_use_apply.call()             # 读条到点 → 应用效果 + 消耗物品（Main._use_item）
+	use_progress.emit(1, false)
+	_cancel_using()
+
+func _cancel_using() -> void:
+	is_using = false
+	use_t = 0.0
+	_use_apply = Callable()
 	_hide_feed_bar()
 
 # === R-74：备弹池（按口径）===
@@ -851,6 +920,9 @@ func stamina_regen_multiplier() -> float:
 func _can_sprint() -> bool:
 	if overload_factor < GameConstants.MILD_OWE_FACTOR + 0.01:
 		return false  # heavy overweight cannot sprint
+	# R-new【基地不耗体力】：基地内跑步**体力为零也能跑**（用户需求②）。超重门禁在上面照旧。
+	if time_frozen:
+		return true
 	if stamina < GameConstants.SPRINT_STAMINA_COST * get_physics_process_delta_time():
 		return false
 	return true
@@ -990,16 +1062,22 @@ func _survival_damage(amount: float, src: String = "starve") -> void:
 	if hp <= 0.0:
 		_die()
 
+# R-new：负 amount = 负恢复（压缩饼干口渴-10 / 肉干口渴-5 / 草药口渴-10 等"干粮越吃越渴"设计）。
+#   ⚠ 下界钳制 0 是本批新增：原先只有 minf 上限，负值会把生存条打到负数
+#   （归零掉血判定 `<= 0.0` 仍正确，但 HUD 会显示 "-5 / 100"）。
+#   clampf 同时保住上下界，语义 = "恢复量可正可负，条本身永远停在 [0, MAX]"。
 func restore_hunger(amount: float) -> void:
 	if state == State.DEAD:
 		return
-	hunger = minf(GameConstants.HUNGER_MAX, hunger + amount)
+	hunger = clampf(hunger + amount, 0.0, GameConstants.HUNGER_MAX)
 	hunger_changed.emit(hunger, GameConstants.HUNGER_MAX)
 
+# ⚠ 负值口径同 restore_hunger（R-new）：clampf 下界 0 防负数显示。
+#   `--verify-cola` ⑤ 的"thirst 99 + 15 = 恰好 100"由 clampf 的上界继续保证（minf 口径不变）。
 func restore_thirst(amount: float) -> void:
 	if state == State.DEAD:
 		return
-	thirst = minf(GameConstants.THIRST_MAX, thirst + amount)
+	thirst = clampf(thirst + amount, 0.0, GameConstants.THIRST_MAX)
 	thirst_changed.emit(thirst, GameConstants.THIRST_MAX)
 
 func reset_full() -> void:
@@ -1029,6 +1107,7 @@ func reset_full() -> void:
 	_trigger_held = false
 	_trigger_edge = false
 	_cancel_feeding()          # R-144：重开 = 补给读条也复位（R 键按住时长一并清零）
+	_cancel_using()            # R-new：重开 = 使用读条一并复位
 	_r_hold_t = 0.0
 	_r_long_fired = false
 	_emit_all_signals()

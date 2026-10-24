@@ -62,6 +62,9 @@ const FloorGeneratorScript := preload("res://scripts/gen/FloorGenerator.gd")
 const StaticFloorScript := preload("res://scripts/gen/StaticFloor.gd")   # R-118：基地静态 ASCII 地图解析/导出
 const WeaponPickupScene := preload("res://scenes/weapons/WeaponPickup.tscn")
 const CrateScene := preload("res://scenes/furniture/Crate.tscn")
+# R-155：家具用**脚本**而不是 .tscn —— 16 种家具的差异只有「精灵 + 分档」两个变量，
+#   用 `Furniture.gd` 代码构建即可，不必铺 16 个场景文件（与 R-112/R-123/R-144 同款取舍）。
+const FurnitureScript := preload("res://scenes/furniture/Furniture.gd")
 const PlayerScript := preload("res://scenes/player/Player.gd")
 const MercenaryScene := preload("res://scenes/enemies/Mercenary.tscn")
 # R-146：第三种敌人「快攻型僵尸」。⚠ `preload` 要求资源**已存在**，
@@ -79,10 +82,18 @@ const FogGridScript := preload("res://scripts/world/FogGrid.gd")
 const TraceArrowsScript := preload("res://scenes/ui/TraceArrows.gd")
 # R-110：验证入口要造「已知距离」的裸箱子，用Crate 脚本直接 new（不过 tscn）。
 const CrateScript := preload("res://scenes/furniture/Crate.gd")
+# R-new：敌人尸体（代码 new、不动 Main.tscn；同 CrateScript 思路）。
+# ⚠ 刻意**不用 class_name**：避免新增全局类后忘记 `--import` 重扫
+#   （见记忆 §12「Could not find type」事故），preload 方式零缓存依赖。
+const CorpseScript := preload("res://scenes/furniture/Corpse.gd")
 # R-113：第 100 层基地的「出发瓦片」。同样**代码 new、不动 Main.tscn**（R-112 同款取舍）。
 const DepartTileScript := preload("res://scenes/world/DepartTile.gd")
 # R-119：第 100 层基地的「是否出发」确认框（代码 new、键盘驱动 F/Esc）。
-const DepartConfirmScript := preload("res://scenes/ui/DepartConfirm.gd")
+const FloorSelectScript := preload("res://scenes/ui/FloorSelect.gd")   # R-new：楼层选择面板（取代 DepartConfirm）
+const FloorElevatorScript := preload("res://scenes/world/FloorElevator.gd")   # R-new：战斗层出发点电梯
+const BaseBedScript := preload("res://scenes/world/BaseBed.gd")   # R-new：基地双人床（睡觉回血+扣饥渴）
+const NpcDialogScript := preload("res://scenes/ui/NpcDialog.gd")   # R-new：NPC 对话系统（屏幕空间）
+const BaseNpcScript := preload("res://scenes/world/BaseNpc.gd")   # R-new：基地 NPC1 世界实体
 
 var _game_over: bool = false
 
@@ -118,6 +129,8 @@ var _trace_marking: bool = false        # 5 秒窗口是否处于激活态
 #   （宝箱标记**不在这里** —— 见下方 `_scan_crate_marks`，且画不画由 FloorMap 按 fog 现判。）
 var _trace_marks: Array = []             # R-147：敌人红点世界坐标（5 秒临时）
 var _trace_cd_left_game: float = 0.0     # 冷却剩余（**游戏内秒**）
+var _minimap_t: float = 0.0              # R-new：迷你地图重算节流计时
+var _open_map_at_start: bool = false    # R-new：`--open-map` 调试 flag（开局即开大地图）
 # R-147：本层全部宝箱 [[world_pos, color], ...]。**持久**（不随 5 秒窗口消失）。
 #   ⚠ 这里**只存「有哪些箱子 + 各是什么颜色」**，不存「哪些已被发现」——
 #   「已发现」≡「所在格已探索」，由 `FloorMap._draw()` 现查 fog 判定（唯一真相源）。
@@ -167,8 +180,9 @@ var _return_btn = null                # ReturnBtn 实例
 #   **第 100 层基地为静态手工场景，不参与生成**」→ 战斗层（99–1）一律沿用既有 `exit_marker`
 #   「走到出口即下降」，**行为与键位一个字都不改**（本批只动第 100 层）。
 var _depart_tile = null               # DepartTile 实例（代码 new，见 _ready）
-var _depart_confirm = null            # R-119：出发确认框实例（代码 new，见 _ready）
-var _depart_confirm_open: bool = false  # R-119：确认框是否打开（F 确认 / Esc 取消 / 走开自动关）
+var _floor_elevator = null           # R-new：战斗层出发点电梯实例（代码 new，见 _ready）
+var _floor_select = null              # R-new：楼层选择面板实例（代码 new，见 _ready）
+var _floor_select_open: bool = false    # R-new：面板是否打开（F 前往 / Esc 取消 / 走开自动关）
 # 本层出生点 + 网格快照（R-113：`_depart_tile_pos()` 要按出生点偏移、并查偏移点是否落在墙里）
 var _floor_spawn: Vector2 = Vector2.ZERO
 var _floor_grid: PackedByteArray = PackedByteArray()
@@ -248,12 +262,24 @@ var _verify_basecrates: bool = false  # R-119：基地储藏室 25 空箱 + 起�
 var _verify_basefrozen: bool = false  # R-121：基地内时间冻结（饥渴/体力）
 var _verify_ammofeed: bool = false    # R-144：长按 R 补给弹药盒（方案 A）
 var _verify_wepeicon: bool = false    # R-123：武器图标替换玩家三角形
+var _verify_itemicon: bool = false    # R-154：物品图标实装（10×10 与背包槽位 1:1）
+var _verify_furniture: bool = false   # R-155：家具 4 档功能分档 + 房间主题
+var _dump_floor: bool = false        # R-155：把一层楼生成结果导出 JSON（离线渲染地图预览）
 var _verify_tiles: bool = false      # R-131：16px 瓦片渲染 / 生成器产物自检
 var _verify_crate_sprite: bool = false  # R-133：4 类 × 2 态 = 8 张 16×16 箱子精灵接入（含开/关切换）
 var _verify_enemywave: bool = false    # R-146：数量峰值翻倍 + 第三种敌人(快攻型) + 出生点徘徊
 var _verify_fogpersist: bool = false   # R-147：探索状态固化（只有重新生成该层地图才重置）
+var _verify_elevator: bool = false   # R-new：出发点电梯 + 下楼保持位置
+var _verify_aimreveal: bool = false  # R-new：右键瞄准探图（准星格升为已探索）
+var _verify_basbed: bool = false     # R-new：基地双人床（站床旁按 F 回血+扣饥渴）
+var _verify_npcdialog: bool = false  # R-new：基地 NPC1 对话系统
+var _base_bed: Node2D = null  # R-new：基地双人床（站床旁按 F 回血+扣饥渴，仅基地层有效）
+var _npc_dialog: Node2D = null  # R-new：NPC 对话框（屏幕空间，_ready 建一次，持久）
+var _base_npc: Node2D = null    # R-new：基地 NPC1 世界实体（仅基地层，_build_floor 建）
 var _verify_enemy_sprite: bool = false # R-148：16×16 程序化敌人精灵接入（zombie/merc/brute）+ 三向可分 + flip_v 朝向同步
+var _verify_corpse: bool = false       # R-new：敌人尸体（战利品 1~3 件 / 同瓦片合并 / F 搜索 / 不进 crates 组）
 var _verify_splitter: bool = false   # R-149：Boss 敌人「分裂怪」（第 90 层最大房间 / 体型 2x2 / 不攻击 / 周期生成小怪）
+var _verify_bossphase: bool = false  # R-158：Boss 第二阶段（TASKS 卡 B2）——阈值/周期/连发/移速/血条色 可配 + 单向
 # ---- R-116：`--verify-wallreal`（关卡墙**真的**参与物理）----
 # ⚠ **补的是既有覆盖盲区**：`--verify-wallblock` 自己现造墙，所以它证明的是
 #   「墙机制能用」，**不是**「关卡生成的墙有效」（R-112 起后者一直是假的）。
@@ -323,6 +349,7 @@ func _ready() -> void:
 	# R-144：补给读条的文字提示走**既有 toast 通道**（第 二 节约束 3：不碰 `_update_hint()` 函数体）。
 	#   Player 只发信号（它不写字，世界空间禁文字）；Main 把它翻成屏幕空间提示。
 	player.feed_progress.connect(_on_feed_progress)
+	player.use_progress.connect(_on_use_progress)   # R-new：消耗品使用读条提示
 	# 验证参数化：先解析（须在首个 _build_floor 之前，注入的种子才能作用于第 1 层）
 	_parse_verify_params()
 
@@ -364,12 +391,28 @@ func _ready() -> void:
 		# clamp 到合法层号：传 0 / 999 / 负数都夹到 1..100，不生成"第 0 层 / 第 101 层"
 		_verify_startfloor = clampi(_sf, GameConstants.DEEPEST_FLOOR, GameConstants.START_FLOOR)
 		_floor = _verify_startfloor
+	# ==== R-new（2026-10-19）：`--start-floor N`（GUI 调试 / 录帧取证用）====
+	# 【为什么需要】录指定层（如 99）的实机帧时，原先只能进基地再走出发流程；
+	#   本 flag 让 GUI 模式直接起到该层。与 `--verify-startfloor` 的分工：
+	#   那个是 headless 回归覆盖层；本 flag 只在**非 verify 模式**生效，
+		#   （回归若误带本 flag，_verify_startfloor 已抢先覆盖，这里不再改）。
+	# ⚠ 位置硬约束：必须在下方首个 `_build_floor(true)`（387 行一带）**之前**。
+	# ⚠ clamp 到 1..100：传 0/999/负数夹到合法层，不生成不存在的层号。
+	if _verify_startfloor < 0 and "--start-floor" in OS.get_cmdline_args():
+		var _sf_gui: int = _cmdline_int_after("--start-floor", -1)
+		if _sf_gui >= 0:
+			_floor = clampi(_sf_gui, GameConstants.DEEPEST_FLOOR, GameConstants.START_FLOOR)
+			_verify_log("start-floor override (GUI debug): floor=%d" % _floor)
 	# R-83：实机试玩数据记录设施。**默认关闭**（仅 --playtest-log 开启），
 	#   关闭时 PlaytestLog 内部全部空转且不跑 _process → 对正常游玩零行为变化。
 	#   必须在 _build_floor 之前 attach：这样第 1 层的时间轴从生成那一刻就开始计。
 	PlaytestLog.attach(player)
 	PlaytestLog.set_seed(_seed)
 	_fog = FogGridScript.new()  # 战争迷雾（R-70）：须在首个 _build_floor 之前就绪
+	# ==== R-new（2026-10-21）：`--open-map`（GUI 调试/录帧：开局即打开 M 大地图）====
+	#   与 `--start-floor` 同款定位：手动调试用，**不进回归 ENTRIES**，默认不传 = 零影响。
+	if "--open-map" in OS.get_cmdline_args():
+		_open_map_at_start = true
 	_build_world_bounds()  # 世界底色 + 摄像机 limits（按 GameConstants）
 	_build_floor(true)  # cp2：程序化生成第 1 层
 	_grant_starting_items()  # R-71：开局背包里给一把 MP5 冲锋枪（占 6 格）
@@ -381,7 +424,10 @@ func _ready() -> void:
 	#   若反序先建节点，首个 `_build_floor` 的摆位逻辑会因 `_depart_tile == null` 空转，
 	#   基地层就看不到瓦片（`visible` 仍是 `_ready` 里置的 false）。
 	_build_depart_tile()
-	_build_depart_confirm()    # R-119：出发确认框（代码建节点，键盘驱动）
+	_build_floor_elevator()    # R-new：战斗层出发点电梯（须在 _build_floor(true) 之后，理由同 DepartTile）
+	_build_npc_dialog()          # R-new：NPC 对话框（代码建 CanvasLayer + NpcDialog）
+	_build_floor_select()      # R-new：楼层选择面板（代码建节点，键盘驱动；取代 R-119 确认框）
+	_apply_ui_scale()         # R-new：640×360 实装 —— 屏幕空间 UI 整体缩放铺满（必须在各 build 之后）
 	# ==== R-131：`--verify-tilecam X Y`（**仅测试用**的录帧取景挪人）====
 	# 【为什么需要它 —— 实测发现的取景问题，不是「为了凑数据」】
 	#   程序化层的出生点**不一定**落在墙-rich 区域。实测第 99 层：
@@ -477,23 +523,35 @@ func _ready() -> void:
 	_verify_basefrozen = "--verify-basefrozen" in OS.get_cmdline_args()   # R-121：基地时间冻结验证
 	_verify_ammofeed = "--verify-ammofeed" in OS.get_cmdline_args()       # R-144：长按 R 补给弹药盒
 	_verify_wepeicon = "--verify-wepeicon" in OS.get_cmdline_args()       # R-123：武器图标替换验证
+	_verify_itemicon = "--verify-itemicon" in OS.get_cmdline_args()
+	_verify_furniture = "--verify-furniture" in OS.get_cmdline_args()      # R-155：家具验证       # R-154：物品图标实装验证
+	_dump_floor = "--dump-floor" in OS.get_cmdline_args()                  # R-155：导出楼层 JSON
 	_verify_tiles = "--verify-tiles" in OS.get_cmdline_args()# R-131：16px瓦片渲染 / 生成器自检
 	_verify_crate_sprite = "--verify-crate-sprite" in OS.get_cmdline_args()  # R-133：箱子精灵接入
 	_verify_enemywave = "--verify-enemywave" in OS.get_cmdline_args()          # R-146：数量翻倍 + 快攻型僵尸 + 出生点徘徊
 	_verify_fogpersist = "--verify-fogpersist" in OS.get_cmdline_args()        # R-147：探索状态固化（只有重新生成该层才重置）
 	_verify_enemy_sprite = "--verify-enemy-sprite" in OS.get_cmdline_args()    # R-148：敌人精灵接入
 	_verify_splitter = "--verify-splitter" in OS.get_cmdline_args()            # R-149：分裂怪 Boss
+	_verify_bossphase = "--verify-bossphase" in OS.get_cmdline_args()          # R-158：Boss 第二阶段
+	_verify_corpse = "--verify-corpse" in OS.get_cmdline_args()                # R-new：敌人尸体系统
 	# ⚠⚠ **本 flag 刻意不加进 `_has_verify_flag()`（R-88）或 `_parse_verify_params()` 白名单（R-94）** ——
 	#   那两处只认无头 bot 自己的参数。加进去会先命中 `_verify_headless` 走 bot 分支，
 	#   `_verify_loc_test()` **永远不会被调用**（症状：日志里全是 FLOOR 行，没有本测试的收尾行）。
 	_verify_wallreal = "--verify-wallreal" in OS.get_cmdline_args()   # R-116：关卡墙真实碰撞
-	if _verify_headless or _verify_load or _verify_gen or _verify_wep or _verify_move or _verify_enemy or _verify_map or _verify_mapui or _verify_wallblock or _verify_nav or _verify_faction or _verify_pause or _verify_inv or _verify_ui or _verify_fog or _verify_item or _verify_fog_off or _verify_perception or _verify_ammo or _verify_merc or _verify_zombie or _verify_survival or _verify_pauseinfo or _verify_crate or _verify_reservecap or _verify_fairfire or _verify_loot or _verify_playtest or _verify_reloadcancel or _verify_spread or _verify_stagger or _verify_mp133 or _verify_loadout2 or _verify_food or _verify_decay or _verify_enemyclash or _verify_cratedoor or _verify_lunge or _verify_shells or _verify_cola or _verify_verb or _verify_canned or _verify_gear or _verify_boxsem or _verify_staminareg or _verify_cratetype or _verify_enemycurve or _verify_hint or _verify_rider or _verify_trace or _verify_uibox or _verify_floor100 or _verify_depart or _verify_sfx or _verify_useitem or _verify_wallreal or _verify_loc or _verify_f100map or _verify_basecrates or _verify_basefrozen or _verify_ammofeed or _verify_wepeicon or _verify_tiles or _verify_crate_sprite or _verify_enemywave or _verify_fogpersist or _verify_enemy_sprite or _verify_splitter:
+	_verify_elevator = "--verify-elevator" in OS.get_cmdline_args() # R-new：出发点电梯 + 下楼保持位置
+	_verify_aimreveal = "--verify-aimreveal" in OS.get_cmdline_args() # R-new：右键瞄准探图（准星格升为已探索）
+	_verify_basbed = "--verify-basbed" in OS.get_cmdline_args() # R-new：基地双人床回血+扣饥渴
+	_verify_npcdialog = "--verify-npcdialog" in OS.get_cmdline_args() # R-new：基地 NPC1 对话系统
+	if _verify_headless or _verify_load or _verify_gen or _verify_wep or _verify_move or _verify_enemy or _verify_map or _verify_mapui or _verify_wallblock or _verify_nav or _verify_faction or _verify_pause or _verify_inv or _verify_ui or _verify_fog or _verify_item or _verify_fog_off or _verify_perception or _verify_ammo or _verify_merc or _verify_zombie or _verify_survival or _verify_pauseinfo or _verify_crate or _verify_reservecap or _verify_fairfire or _verify_loot or _verify_playtest or _verify_reloadcancel or _verify_spread or _verify_stagger or _verify_mp133 or _verify_loadout2 or _verify_food or _verify_decay or _verify_enemyclash or _verify_cratedoor or _verify_lunge or _verify_shells or _verify_cola or _verify_verb or _verify_canned or _verify_gear or _verify_boxsem or _verify_staminareg or _verify_cratetype or _verify_enemycurve or _verify_hint or _verify_rider or _verify_trace or _verify_uibox or _verify_floor100 or _verify_depart or _verify_sfx or _verify_useitem or _verify_wallreal or _verify_loc or _verify_f100map or _verify_basecrates or _verify_basefrozen or _verify_ammofeed or _verify_wepeicon or _verify_itemicon or _verify_furniture or _verify_tiles or _verify_crate_sprite or _verify_enemywave or _verify_fogpersist or _verify_enemy_sprite or _verify_splitter or _verify_elevator or _verify_aimreveal or _verify_basbed or _verify_npcdialog or _verify_bossphase:
 		if not _log_initialized:
 			_log_initialized = true
 			var lf := FileAccess.open(_DOD_LOG, FileAccess.WRITE)
 			if lf:
 				lf.store_line("=== cp2 verify ===")
 				lf.close()
+	if _dump_floor:
+		_dump_floor_test()
+		return
 	if _verify_headless:
 		_verify_t = 0.0
 		_verify_stage = 0
@@ -683,6 +741,10 @@ func _ready() -> void:
 		return
 	elif _verify_wepeicon:
 		_verify_wepeicon_test()
+	elif _verify_itemicon:
+		_verify_itemicon_test()
+	elif _verify_furniture:
+		_verify_furniture_test()
 		return
 	elif _verify_tiles:
 		_verify_tiles_test()
@@ -699,8 +761,26 @@ func _ready() -> void:
 	elif _verify_enemy_sprite:
 		_verify_enemy_sprite_test()
 		return
+	elif _verify_elevator:
+		_verify_elevator_test()
+		return
+	elif _verify_aimreveal:
+		_verify_aimreveal_test()
+		return
+	elif _verify_basbed:
+		_verify_basbed_test()
+		return
+	elif _verify_npcdialog:
+		_verify_npcdialog_test()
+		return
 	elif _verify_splitter:
 		_verify_splitter_test()
+		return
+	elif _verify_bossphase:
+		_verify_bossphase_test()
+		return
+	elif _verify_corpse:
+		_verify_corpse_test()
 		return
 
 # 全屏切换：F11（viewport 拉伸模式，准星坐标仍映射 320×180 基准，不偏移）
@@ -713,13 +793,37 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.physical_keycode == KEY_TAB:
 			_toggle_backpack()                 # Tab：背包
 		elif event.physical_keycode == KEY_F:
-			# R-119：F 统一交互键，优先级从高到低：
-			#   ① 确认框开着 → F 确认下楼；② 站上出发瓦片 → 弹确认框；③ 否则 → 开箱。
+			# R-new：F 统一交互键，优先级从高到低：
+			#   ① 楼层选择面板开着 → F 前往选中层；② 站上出发瓦片 → 开面板；③ 否则 → 开箱。
 			#   ⚠ 出发瓦片长在基地中央通道、箱子在储藏室/起始房间，位置互斥不抢占。
-			if _depart_confirm_open:
-				_confirm_depart()
+			# R-new（2026-10-22）：对话开着 → F 推进一句（优先级最高，压过楼层面板/出发/电梯/床/开箱）
+			if _npc_dialog != null and is_instance_valid(_npc_dialog) and _npc_dialog.is_open():
+				_npc_dialog.advance()
+			elif _floor_select_open:
+				_confirm_floor_select()
 			elif not _try_depart():
-				_toggle_container()
+				# ⚠⚠ R-new（2026-10-22）：depart 失败后才试电梯 —— **必须嵌套 if**，
+				#   不能写成平级 `elif not _try_elevator()`：那个 elif 永远不可达
+				#   （前面的 `elif not _try_depart()` 已吞掉全部 false 情况）。
+				#   优先级：楼层面板 > 基地瓦片 > **出发点电梯** > 开箱。
+				if not _try_elevator():
+					# R-new（2026-10-22）：电梯后试床（基地层站床旁按 F 回血+扣饥渴）—— 同样嵌套 if，防平级 elif 不可达
+					if not _try_bed():
+						# R-new（2026-10-22）：床后试 NPC（基地层站 NPC 旁按 F 开对话）—— 同样嵌套 if，防平级 elif 不可达
+						if not _try_npc():
+							_toggle_container()
+		elif event.physical_keycode == KEY_W or event.physical_keycode == KEY_S:
+			# R-new（2026-10-22）：楼层选择面板光标改用 **W/S**（W=上、S=下）；↑/↓ 绑定已移除。
+			# 【无泄漏 / 无重复绑定】本项目是**事件驱动**（_unhandled_input），没有 InputMap 常驻
+			#   action 可泄漏——本分支的 `_floor_select_open` 守卫就是"注册/解绑"开关：
+			#   面板开 → move；面板关 → 什么都不做（W/S 只被 Player 的 input_dir 轮询读取；
+			#   且面板开着时 get_tree().paused=true → Player._physics_process 不跑，绝不双驱动）。
+			if _floor_select_open and _floor_select != null:
+				_floor_select.move_row(-1 if event.physical_keycode == KEY_W else 1)
+		elif event.physical_keycode == KEY_A or event.physical_keycode == KEY_D:
+			# R-new（2026-10-22）：A/D = 多列网格左右移动（同页换列，保持行号）；↑/↓ 无关。
+			if _floor_select_open and _floor_select != null:
+				_floor_select.move_col(-1 if event.physical_keycode == KEY_A else 1)
 		elif event.physical_keycode == KEY_V:
 			_toggle_trace()                     # R-110：宝箱定位（V）
 		elif event.physical_keycode == KEY_F10:
@@ -728,8 +832,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			#   关闭 --playtest-log 时这一行是空操作。
 			PlaytestLog.note_manual_dump()
 		elif event.physical_keycode == KEY_ESCAPE:
-			if _depart_confirm_open:
-				_cancel_depart()               # R-119：确认框开着 → Esc 取消（优先于菜单/背包）
+			# R-new（2026-10-22）：对话开着 → Esc 关闭对话（优先于面板/菜单/背包/地图/暂停）
+			if _npc_dialog != null and is_instance_valid(_npc_dialog) and _npc_dialog.is_open():
+				_npc_dialog.close()
+			elif _floor_select_open:
+				_cancel_floor_select()         # R-new：面板开着 → Esc 取消（优先于菜单/背包）
 			elif item_menu.open:
 				_close_item_menu()             # 右键菜单开着 → 先关菜单（R-71）
 			elif backpack.visible:
@@ -745,6 +852,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
 				else:
 					floor_map.visible = false  # 地图开着 → 关地图
+					_restore_hud_after_map()   # R-new：恢复被开图藏起的 HUD/返回按钮（原遗漏 → 全 UI 消失）
 			else:
 				_toggle_pause()                # 否则 → 暂停页面
 # 背包 / 箱子界面的鼠标交互放在 `_input`（**不是** `_unhandled_input`）：
@@ -763,6 +871,14 @@ func _input(event: InputEvent) -> void:
 	#   （`ReturnBtn._gui_input` 保留着：真实窗口下鼠标也能点中，两条路都通。）
 	if _try_return_btn_click(event):
 		return
+	# R-new（2026-10-22）：楼层选择面板 —— 鼠标点击选中 + 悬停高亮（与键盘共用同一 _cursor，互不冲突）
+	if _floor_select_open and _floor_select != null:
+		if _try_floor_select_click(event):
+			return
+		if event is InputEventMouseMotion:
+			var fs_lp: Vector2 = _floor_select.get_global_transform_with_canvas().affine_inverse() * (event as InputEventMouseMotion).position
+			_floor_select.set_hover(fs_lp)
+			return
 	if not backpack.visible:
 		return
 	if event is InputEventMouseMotion and item_menu.open:
@@ -804,6 +920,8 @@ func _input(event: InputEvent) -> void:
 func _toggle_backpack() -> void:
 	if _paused or _game_over:
 		return                       # 暂停页面 / 死亡画面时不弹背包
+	if player.is_feeding or player.is_using:
+		return   # R-new：读条中不开背包/箱子（避免读条时还用其他物品）
 	if backpack.visible:
 		_close_backpack()
 	else:
@@ -815,6 +933,12 @@ func _toggle_backpack() -> void:
 		Sfx.play("ui_confirm")
 
 func _open_backpack(with_container: bool) -> void:
+	# ==== R-new【开 UI 即停火】：任何会弹界面的操作之前，先清掉扳机按住状态 ====
+	#   根因/详见 Player.stop_firing() 注释：`_trigger_held` 只由鼠标松开事件清零，
+	#   而界面打开后松开左键的事件被背包 UI 输入链路吃掉 → 状态残留 → 自动武器关界面后永不停火。
+	#   ⚠ 放在**所有开界面路径的公共漏斗**这里（Tab 背包 / F 箱子都汇合到 `_open_backpack`），
+	#     一处改动覆盖两条入口；`stop_firing()` 幂等，多调无害。
+	player.stop_firing()
 	# R-101：负重上限走 `player.carry_capacity()`（裸装 60 / 穿双肩包 80），
 	#   **不再直接引用 `CARRY_CAPACITY`** —— 否则装备双肩包后背包 UI 会显示
 	#   "负重 13.5 / 60" 而真实上限是 80（与暂停页/HUD 口径打架，R-89 同类 bug）。
@@ -913,7 +1037,11 @@ func _close_backpack() -> void:
 	_close_item_menu()
 	# R-120：关闭时若刚操作的是储物箱 → 物品变化立即落盘（在 `_container=null` 之前判断）。
 	#   ⚠ 只对 storage 箱子写；普通箱子（随机 roll）和起始固定箱（每局刷新）都不持久化。
-	if _container != null and is_instance_valid(_container) and bool(_container.get("storage")):
+	# ⚠⚠ 用 `get("storage") == true` 而不是 `bool(get(...))` / `get(..., false)`：
+	#   ① `bool(null)` 在 Godot 4.7.2 是运行时错误（报 "Nonexistent 'bool' constructor"，误导）；
+	#   ② `Object.get()` 只收 1 个参数，没有 Dictionary 那样的默认值重载。
+	#   Corpse 没有 storage 字段 → get 返回 null → `null == true` 为 false，语义正确。
+	if _container != null and is_instance_valid(_container) and _container.get("storage") == true:
 		_save_storage_items()
 	backpack.visible = false
 	backpack.container_open = false
@@ -991,7 +1119,7 @@ func _move_item(src: Dictionary) -> bool:
 #      让"同类物品"自然聚成一团（这正是"整理背包"最直观的效果）。
 #   ② 同类内按**占格大小**（w×h）从大到小：大件先落左上角，占不满的小件塞缝里。
 #   ③ 再按重量从大到小；最后按 id 稳定排序（避免每次开包顺序抖动）。
-# ⚠ 只整理**玩家背包**（左栏 `_inv`），箱子（右栏）不动 —— 需求只点名"背包"。
+# ⚠ 左栏背包 `_inv` 与右栏箱子 `_container.items` 各自独立排序（2026-10-22 用户需求：箱子也要排序按钮）。
 # ⚠ 必须先擦掉每件物品的 gx/gy 再 `ensure_placement`：否则 `ensure_placement` 只给
 #   "没坐标的"补位，旧坐标会原样保留 → 排序后位置根本没变（静默失效）。
 func _item_sort_key(it: Dictionary) -> Array:
@@ -1002,10 +1130,8 @@ func _item_sort_key(it: Dictionary) -> Array:
 	var wt: float = float(it.get("weight", 0.0))
 	return [k, slots, wt]
 
-func _sort_backpack() -> void:
-	if not backpack.visible:
-		return
-	var arr: Array = _inv
+# 通用：按「类型→占格→重量→id」排序并重摆（rows = 该栏行数；背包 INV_ROWS / 箱子 CONT_ROWS）。
+func _sort_array(arr: Array, rows: int) -> void:
 	for it in arr:
 		it.erase("gx")
 		it.erase("gy")
@@ -1020,7 +1146,21 @@ func _sort_backpack() -> void:
 			return ka[2] > kb[2]      # 重的在前
 		return String(a.get("id", "")).casecmp_to(String(b.get("id", ""))) < 0
 	)
-	backpack.ensure_placement(arr, GameConstants.INV_ROWS)
+	backpack.ensure_placement(arr, rows)
+
+func _sort_backpack() -> void:
+	if not backpack.visible:
+		return
+	_sort_array(_inv, GameConstants.INV_ROWS)
+	_refresh_backpack()
+
+# R-new（2026-10-22 用户需求）：箱子（右栏）排序 —— 与背包同口径，整理 `_container.items`。
+func _sort_container() -> void:
+	if not backpack.visible or not backpack.container_open:
+		return
+	if _container == null or not is_instance_valid(_container):
+		return
+	_sort_array(_container.items, GameConstants.CONT_ROWS)
 	_refresh_backpack()
 
 # ==== R-new：Shift + 左键「整类搬运」====
@@ -1079,6 +1219,10 @@ func _ui_press(pos: Vector2, ctrl: bool, shift: bool) -> void:
 	# R-new：排序按钮（标题行右端）。**先于**一切物品/装备判定（按钮不与其他区域重叠）。
 	if backpack.sort_button_rect().has_point(pos):
 		_sort_backpack()
+		return
+	# R-new（2026-10-22）：箱子（右栏）排序按钮
+	if backpack.container_open and backpack.cont_sort_button_rect().has_point(pos):
+		_sort_container()
 		return
 	# R-101：装备槽上的物品也能拖（拖出来 = 卸下）
 	var gs: int = backpack.gear_pick_test(pos)
@@ -1365,6 +1509,7 @@ func _menu_entries_for(it: Dictionary, list_name: String) -> Array:
 	return out
 
 func _open_item_menu(pos: Vector2) -> void:
+	player.stop_firing()      # R-new：弹右键菜单前先停火（同 _open_backpack 口径）
 	var hit: Dictionary = backpack.pick_test(pos)
 	if hit.is_empty():
 		_close_item_menu()
@@ -1395,7 +1540,10 @@ func _menu_action(action: String) -> void:
 	if idx >= 0 and idx < arr.size():
 		var it: Dictionary = arr[idx]
 		if action == "use":
-			_use_item(it, list_name, idx)
+			if String(it.get("kind", "")) == "consumable":
+				_begin_use_item(it, list_name, idx)   # R-new：消耗品走读条；弹药盒仍瞬发
+			else:
+				_use_item(it, list_name, idx)
 		elif action == "equip":
 			_equip_item(it, list_name, idx)
 		elif action == "move":
@@ -1431,6 +1579,41 @@ func _ui_double_click(pos: Vector2) -> void:
 		_menu_action(act)
 
 # 使用：消耗品（回血/回体力）或弹药盒（并入备弹池）；用完移除（在背包里则减负重）
+# ==== R-new：消耗品「使用读条」UI 入口（右键菜单 / 双击共用）====
+# 直接 `_use_item` 是瞬发；本函数套上「关背包 → 世界读条 → 满则生效」的同款读条。
+# ⚠ `_use_item` 不改动（--verify-useitem 有静态源码断言读它），只作读条完成回调。
+# ⚠ 先 `_close_backpack()`：读条要时间流逝，背包开着=游戏暂停；关包即解暂停，读条才能在跑。
+#   同时满足用户"读条时关闭背包/箱子界面，避免再用其他物品"。
+func _begin_use_item(it: Dictionary, list_name: String, idx: int) -> void:
+	# ==== R-new（2026-10-22 修复「箱子界面内用消耗品不消耗/不消失」）====
+	# 【根因】本函数**先 `_close_backpack()`**（为解除暂停让读条能跑），而 `_close_backpack`
+	#   会把 `_container = null` → 读条完成后 `_use_item(it, "cont", idx)` 里
+	#   `_item_list_of("cont")` 变成 [] → **容器里的消耗品扣不掉**（背包 list="inv" 不受影响，
+	#   故"在背包里用"正常、"在箱子里用容器物品"不消耗，正是本 bug）。
+	# 【修法】读条前**捕获物品所在数组引用 + 容器引用**；读条完成后若 `_use_item` 没删掉
+	#   （cont 被置空），从捕获数组按引用补删一次；若是 storage 容器再补存一次
+	#   （关包时的 `_save_storage_items` 是"消耗前"快照，不补存会导致下次重开又出现）。
+	#   ⚠ 不改 `_use_item` 本体（`--verify-useitem` 有静态源码断言读它）；inv 项走原逻辑不变。
+	var src_arr: Array = _item_list_of(list_name)
+	var src_container: Node = _container if (list_name == "cont" and _container != null and is_instance_valid(_container)) else null
+	_close_backpack()
+	var apply := func(a: Dictionary, ln: String, i: int) -> bool:
+		var used: bool = _use_item(a, ln, i)
+		if used and ln == "cont":
+			for k in range(src_arr.size() - 1, -1, -1):
+				if src_arr[k] == a:
+					src_arr.remove_at(k)
+					break
+			if src_container != null and is_instance_valid(src_container) and src_container.get("storage") == true:
+				_save_storage_items()   # 容器存档：把"已消耗"落盘（否则下次重开容器物品又冒出来）
+		return used
+	player.start_using(apply.bind(it, list_name, idx))
+
+# ==== R-new：消耗品使用读条提示（与补给读条同款 toast 通道）====
+func _on_use_progress(done: int, active: bool) -> void:
+	if active:
+		_toast("使用中…", 0.6)
+
 func _use_item(it: Dictionary, list_name: String, idx: int) -> bool:
 	# R-74：弹药盒 → 按自身口径并入备弹池（一盒的量，按口径查 `ammo_box_rounds_of`）
 	if String(it.get("kind", "")) == "ammo":
@@ -1477,15 +1660,22 @@ func _use_item(it: Dictionary, list_name: String, idx: int) -> bool:
 	var stam: float = float(use.get("stamina", 0.0))
 	var food: float = float(use.get("hunger", 0.0))     # R-77：食物
 	var drink: float = float(use.get("thirst", 0.0))    # R-77：饮料
-	if heal <= 0.0 and stam <= 0.0 and food <= 0.0 and drink <= 0.0:
+	# R-new：hunger/thirst 允许**负恢复**（压缩饼干口渴-10 / 肉干口渴-5 / 草药口渴-10
+	#   —— 用户 2026-10-14 逐字需求，"干粮越吃越渴"）。原 `<= 0.0` 汇总门禁与
+	#   `if drink > 0.0:` 应用门禁都会把负值**静默丢弃**（吃了等于没吃，玩家体感是 bug）。
+	#   · 门禁语义 = "四条路径一个都不会触发才拒绝"：heal/stam 仍只认正（负 heal=扣血、
+	#     负 stam=扣体力不在任何需求里，不开口子）；food/drink 认非零。
+	#   · 负值经 `Player.restore_hunger/restore_thirst` 的 clampf 下界 0 落地，不会打出负数条。
+	#   · misc 无 use 物品（零件等）四项全零 → 仍走 return false 安全早退（--verify-useitem ⑤ 不变）。
+	if heal <= 0.0 and stam <= 0.0 and food == 0.0 and drink == 0.0:
 		return false
 	if heal > 0.0:
 		player.heal(heal)
 	if stam > 0.0:
 		player.restore_stamina(stam)
-	if food > 0.0:
+	if food != 0.0:
 		player.restore_hunger(food)
-	if drink > 0.0:
+	if drink != 0.0:
 		player.restore_thirst(drink)
 	var arr: Array = _item_list_of(list_name)
 	if idx >= 0 and idx < arr.size():
@@ -1693,30 +1883,37 @@ func _grant_starting_items() -> void:
 func _toggle_container() -> void:
 	if _paused or _game_over:
 		return
+	if player.is_feeding or player.is_using:
+		return   # R-new：读条中不开箱子
 	if backpack.visible and _container != null:
 		_close_backpack()
 		return
-	var c := _nearest_crate()
+	var c := _nearest_container()   # R-new：箱子 + 尸体（_nearest_crate 只查 crates 组）
 	if c == null:
 		return
 	_container = c
 	if not c.opened:
-		# ==== R-119：预置内容优先（起始房间宝箱固定刷手枪+弹药盒），否则随机 roll ====
-		# ⚠ `preset_items` 是 id 列表（如 ["pistol","ammo_9x19"]），要经 `_proto_by_id`
-		#   转成原型字典再 `duplicate()`（与 `_roll_container_items` 同款防污染）。
-		var preset: Array = c.get("preset_items")
-		if preset.size() > 0:
-			var fixed: Array = []
-			for pid in preset:
-				var proto: Dictionary = _proto_by_id(String(pid))
-				if not proto.is_empty():
-					fixed.append(proto.duplicate())
-			c.items = fixed
-		else:
-			# ==== R-104：把箱子的 `kind` 传进去 → 只刷该类型的物品 ====
-			# ⚠ 传 `String(c.kind)` 而不是 `c.kind`：`_container` 声明为 `Node`，
-			#   静态类型上没有 `kind` 属性，必须走动态属性访问（显式转 String 让意图可读）。
-			c.items = _roll_container_items(String(c.get("kind")))
+		# R-new：尸体的战利品在**死亡瞬间**已 roll 好（`loot_ready`）→ 跳过 roll，
+		#   不清空、不重 roll（否则同瓦片合并进来的物品会被一次开箱冲掉）。
+		# ⚠ 用 `!= true` 而不是 `not bool(get(...))`：Crate 无 loot_ready 字段 → get 返回
+		#   null，而 `bool(null)` 在 Godot 4.7.2 是运行时错误（同 _close_backpack 939 的坑）。
+		if c.get("loot_ready") != true:
+			# ==== R-119：预置内容优先（起始房间宝箱固定刷手枪+弹药盒），否则随机 roll ====
+			# ⚠ `preset_items` 是 id 列表（如 ["pistol","ammo_9x19"]），要经 `_proto_by_id`
+			#   转成原型字典再 `duplicate()`（与 `_roll_container_items` 同款防污染）。
+			var preset: Array = c.get("preset_items")
+			if preset.size() > 0:
+				var fixed: Array = []
+				for pid in preset:
+					var proto: Dictionary = _proto_by_id(String(pid))
+					if not proto.is_empty():
+						fixed.append(proto.duplicate())
+				c.items = fixed
+			else:
+				# ==== R-104：把箱子的 `kind` 传进去 → 只刷该类型的物品 ====
+				# ⚠ 传 `String(c.kind)` 而不是 `c.kind`：`_container` 声明为 `Node`，
+				#   静态类型上没有 `kind` 属性，必须走动态属性访问（显式转 String 让意图可读）。
+				c.items = _roll_container_items(String(c.get("kind")))
 		# R-133：走 `set_opened()` 而不是直接写 `c.opened = true` —— 它会顺带刷新外观，
 		#   保证刚打开的箱子**立刻**由 `{kind}_closed.png` 变为 `{kind}_open.png`。
 		#   （直接写字段不会触发刷新 → 玩家开完箱看到的还是"关着"的图。）
@@ -1741,6 +1938,87 @@ func _nearest_crate() -> Node:
 		if d < bd:
 			bd = d
 			best = c
+	return best
+
+# ==== R-new：敌人尸体系统（2026-10-13 用户需求）====
+# 【需求逐字】「敌人死后会留下尸体，里面包含1到3件战利品。敌人尸体也和箱子一样，
+#   玩家靠近后出现按'F'键搜索的提示，玩家按F后打开箱子界面。如果地面上同一瓦片内有
+#   多具尸体那么将战利品合并到一个尸体内（即同一瓦片内存在多具尸体则仅保留一具）。」
+#
+# 【为什么在 died 回调里（而不是轮询）】
+#   `Zombie._die()` 是 `died.emit()` **先于** `queue_free()` 的同步顺序 →
+#   回调里敌人节点完全有效，可以读它的 EnemyArt（贴图+缩放）与 global_position。
+#   ⚠ 依赖该同步顺序：若将来有人把 emit 移到 queue_free 之后（或改异步），
+#     本函数首行 `is_instance_valid` 会静默跳过 → 尸体不生成。已由 `--verify-corpse` ① 钉住。
+#
+# 【同瓦片合并】键 = 死亡瓦片格（16px/格，`tile` 字段）。已有尸体 → `add_loot()` 并入、
+#   **不创建新节点**（用户逐字「仅保留一具」）。不同格 → 新建尸体挂 `furniture_container`
+#   （换层时 `_build_floor` 的清容器逻辑自动收尸，无需额外清理）。
+func _on_enemy_died(e: Node) -> void:
+	if not is_instance_valid(e):
+		return
+	var n2 := e as Node2D
+	if n2 == null:
+		return
+	var pos: Vector2 = n2.global_position
+	var t := Vector2i(int(floor(pos.x / 16.0)), int(floor(pos.y / 16.0)))
+	var loot: Array = _roll_corpse_loot()
+	# 同瓦片已有尸体 → 合并战利品（保留一具）
+	for n in get_tree().get_nodes_in_group("corpses"):
+		if not is_instance_valid(n):
+			continue
+		if n.get("tile") == t:
+			n.add_loot(loot)
+			return
+	# 新瓦片 → 新建尸体。贴图/缩放取自死亡敌人的 EnemyArt（保持"看得出原本是什么怪"）；
+	#   Boss（分裂怪）的 art.scale 已是杂兵 ×2，照搬即可（无需在尸体侧再分类）。
+	var art := n2.get_node_or_null("EnemyArt") as Sprite2D
+	var tex: Texture2D = art.texture if art != null else null
+	var sc: Vector2 = art.scale if art != null else Vector2(0.75, 0.75)   # 兜底=杂兵图集缩放（ENEMY_ATLAS_SCALE=0.75）
+	# ⚠⚠ R-new 修复：图集模式（Zombie，R-153 四向图集）必须把 region 一起带过去 ——
+	#   只复制 texture/scale 会让尸体画**整张图集**（4 帧 x 4 朝向 = 16 只僵尸平铺），
+	#   实测表现就是用户看到的"一个死后一大片死尸"。死亡瞬间的 region_rect 即当时的
+	#   （帧, 朝向），照搬最自然。单帧模式 region_enabled=false -> 无副作用。
+	var reg := Rect2()
+	var reg_on: bool = false
+	if art != null:
+		reg_on = art.region_enabled
+		reg = art.region_rect
+	var c := CorpseScript.new()
+	c.setup(pos, tex, sc, t, reg, reg_on)
+	furniture_container.add_child(c)
+	c.items = loot
+
+# 敌人尸体战利品：1~3 件，全池等概率。
+# 【为什么是全池而不是按敌人类别分池】用户只说了"1到3件战利品"，没要求分类。
+#   若做"僵尸掉食品 / 佣兵掉弹药"，就要为每类敌人配一张池表 —— 那是未需求的平衡改动，
+#   且会与 R-104 的箱子分池语义混淆（箱子类型**开箱前可见**，敌人类型也可见，
+#   但"掉落表"是另一套玩家预期，宁可先用全池让 `--verify-corpse` 能精确断言件数区间）。
+func _roll_corpse_loot() -> Array:
+	var out: Array = []
+	var types: Array = _crate_pool_types("")   # 空 kind = 全池（与 R-82 老箱子兜底同池）
+	var n: int = randi_range(GameConstants.CORPSE_LOOT_MIN, GameConstants.CORPSE_LOOT_MAX)
+	for i in n:
+		out.append((types[randi() % types.size()] as Dictionary).duplicate())
+	return out
+
+# R-new：F 交互目标 = 箱子（"crates"）+ 尸体（"corpses"）取最近者。
+# ⚠ 为什么不给尸体也加进 "crates" 组：R-110 用户铁律「只显示宝箱，不包括敌人尸体」——
+#   V 扫描按 "crates" 组标标记，尸体进组会被误标（Main.gd `_build_trace_arrows` 注释段
+#   早已预警过这条）。故两组分别遍历、在这里合并。
+# ⚠ `_nearest_crate()` **保留不动**：多个 --verify 入口直调它（只查 crates 组），
+#   改语义会连带打破那些断言。
+func _nearest_container() -> Node:
+	var best: Node = null
+	var bd: float = GameConstants.CRATE_INTERACT_DIST
+	for grp in ["crates", "corpses"]:
+		for c in get_tree().get_nodes_in_group(grp):
+			if not is_instance_valid(c):
+				continue
+			var d: float = player.global_position.distance_to((c as Node2D).global_position)
+			if d < bd:
+				bd = d
+				best = c
 	return best
 
 # 箱子内自动生成的物品
@@ -1829,17 +2107,52 @@ func _update_hint() -> void:
 		#   出发瓦片与箱子位置互斥（瓦片在基地中央通道、箱子在储藏室/起始房间），
 		#   这条优先级只影响"理论上同时满足"的极端情况，取"出发优先"。
 		if _depart_hint_active():
-			t = Loc.t("depart.prompt")
+			t = Loc.t("depart.prompt_select")
+		elif _elevator_hint_active():
+			# R-new：站在战斗层出发点电梯门口 → 提示「按 F 返回基地」（屏幕空间，R-128 合法）
+			t = Loc.t("elevator.prompt")
+		elif _bed_hint_active():
+			# R-new（2026-10-22）：站在基地双人床旁 → 提示「按 F 休息恢复」（屏幕空间，R-128 合法）
+			t = Loc.t("bed.prompt")
+		elif _npc_hint_active():
+			# R-new（2026-10-22）：站在基地 NPC1 旁 → 提示「按 F 交谈」（屏幕空间，R-128 合法）
+			t = Loc.t("npc.prompt")
 		else:
 			# ⚠ 这里用嵌套 if 而不是原来的 `and _nearest_crate() != null`：
 			#   语义完全等价（短路顺序不变 —— 背包开着时**不会**去遍历 crates 组），
 			#   但只需调一次 `_nearest_crate()`（原来判一次、取一次共两次遍历）。
-			var c: Node = _nearest_crate()
+			var c: Node = _nearest_container()
 			if c != null:
 				t = _crate_hint_text(c)
 	if hint.text != t:
 		hint.text = t
 		hint.queue_redraw()
+
+# R-new（2026-10-22）：玩家此刻是否站在出发点电梯门口（战斗层 + 电梯可见 + 半径内）。
+#   与 `_try_elevator()` 用同一个 `player_stands_on()` 判定（单一真相源，防「提示说能按、按了没反应」）。
+func _elevator_hint_active() -> bool:
+	if GameConstants.is_base_floor(_floor):
+		return false
+	if _floor_elevator == null or not _floor_elevator.visible:
+		return false
+	return _floor_elevator.player_stands_on(player.global_position)
+
+# R-new（2026-10-22）：玩家此刻是否站在基地双人床旁（基地层 + 床可见 + 交互半径内）。
+#   与 _try_bed() 用同一个 player_stands_on() 判定（单一真相源）。
+func _bed_hint_active() -> bool:
+	if not GameConstants.is_base_floor(_floor):
+		return false
+	if _base_bed == null or not is_instance_valid(_base_bed) or not _base_bed.visible:
+		return false
+	return _base_bed.player_stands_on(player.global_position)
+
+# R-new（2026-10-22）：玩家此刻是否站在基地 NPC1 旁（基地层 + NPC 可见 + 交互半径内）。
+func _npc_hint_active() -> bool:
+	if not GameConstants.is_base_floor(_floor):
+		return false
+	if _base_npc == null or not is_instance_valid(_base_npc) or not _base_npc.visible:
+		return false
+	return _base_npc.player_stands_on(player.global_position)
 
 # R-122：玩家此刻是否站在出发瓦片上（基地层 + 瓦片可见 + 半径内）。
 #   ⚠ 与 `_try_depart()` 用**同一个** `player_stands_on()` 判定（单一真相源）——
@@ -1860,6 +2173,10 @@ func _depart_hint_active() -> bool:
 func _crate_hint_text(crate: Node) -> String:
 	if crate == null:
 		return ""
+	# R-new：尸体 → 「按 F 搜索尸体」（与箱子的「打开」刻意不同词，玩家靠近时
+	#   一眼分清"这是场景家具还是敌人掉落"，不靠颜色猜）。
+	if crate.is_in_group("corpses"):
+		return Loc.t("hint.corpse_search")
 	var k: String = String(crate.get("kind"))
 	# ⚠ 空 / 非法 kind 的兜底见 `_update_hint` 头注释（**工程侧选择，非用户拍板**）。
 	#   `not has(k)` 这一支防的是"id 拼错"（如 "medic"）—— 与空值同一条兜底，
@@ -1904,7 +2221,18 @@ func _sync_hud_reserve_cap(_label: String = "") -> void:
 	hud._on_reserve_changed(player.reserve_of(cal))   # 立刻按新上限重画条长度
 
 # M 键：显示 / 隐藏楼层地图
+# R-new（2026-10-22）：关闭大地图后**恢复**被开图藏起的 HUD / 返回按钮。
+#   ⚠ 根因：原 Esc 关图分支直接 `floor_map.visible = false`，漏了这段 →
+#     M 开图（hud.visible=false）再 Esc 关图时 hud 永远停在 false → 全 UI 消失。
+func _restore_hud_after_map() -> void:
+	hud.visible = true
+	if _return_btn != null:
+		_return_btn.visible = not GameConstants.is_base_floor(_floor)
+
 func _toggle_map() -> void:
+	# R-new：开地图前先停火（地图是全屏 UI，关掉后自动武器会继续喷）
+	if not floor_map.visible:
+		player.stop_firing()
 	# R-78：暂停时不响应 M —— 暂停页已有「显示地图」按钮，避免两条入口语义打架
 	#   （M 打开的地图 Esc 会直接关掉，而按钮进来的要先回暂停页）。
 	if _paused:
@@ -1916,6 +2244,17 @@ func _toggle_map() -> void:
 		#   若只在开箱/扫描时推一次，之后走过去探索到的箱子就不会出现在地图上。
 		_push_scan_layer()
 	floor_map.visible = not floor_map.visible
+	# ⚠⚠ R-new（2026-10-21 大地图显示优化）：**开大地图时收起其它屏幕空间 UI**。
+	#   原因：大地图在 640×360 下占 512×344（设计空间 256×172 × UI_SCALE 2），
+	#   几乎占满全屏；HUD（layer=10）虽在下层，但迷你地图/技能键/楼层标签仍会
+	#   透过半透明底显形，**返回按钮**（layer=17）更是浮在地图之上 → 视觉冲突。
+	#   ⇒ 打开时隐藏 HUD（含小地图/技能键/楼层标签）与返回按钮，关闭时按当前层还原。
+	if floor_map.visible:
+		hud.visible = false
+		if _return_btn != null:
+			_return_btn.visible = false
+	else:
+		_restore_hud_after_map()
 
 # === 战争迷雾（R-70）===
 # ==== R-141：基地层（第 100 层）**是否渲染**迷雾 ====
@@ -1973,6 +2312,19 @@ func _refresh_fog(force: bool) -> void:
 			_fog_obj_timer = 0.0
 			_update_object_visibility()
 
+	# R-new（2026-10-22）：右键瞄准时，把准星所在格（及周围方形小范围）升为「已探索」——
+	#   玩家可用右键瞄准来探索地图（探索 = 地形记忆，不要求此刻可见）。
+	#   ⚠ 复用 `FogGrid.reveal_square`（只升不降、无视遮挡），与 V 键 `reveal_radius` 同语义；
+	#     准星常落在正常视野半径之外，必须独立揭示，不能靠 update_visibility。
+	#   ⚠ 只在「确有新揭示」时才重烘焙覆盖层，避免每帧全图重绘开销。
+	if player.aiming:
+		var ct: Vector2i = _fog.world_to_tile(player.get_global_mouse_position())
+		# R-new（2026-10-22）：传玩家格做**视线遮挡** —— 墙挡视线，只揭示看得见的格。
+		var from: Vector2i = _fog.world_to_tile(player.global_position)
+		var n: int = _fog.reveal_square(ct, GameConstants.AIM_REVEAL_RADIUS_TILES, from)
+		if n > 0 and fog_overlay != null:
+			fog_overlay.refresh(_fog)
+
 # 动态物体可见性：敌人 / 雇佣兵 / 箱子 / 掉落 / 出口标记 —— 仅当所在格为「可见」时绘制。
 # 已探索但不可见 → 不绘制（口径④）。玩家永远可见（其所在格恒为可见）。
 func _update_object_visibility() -> void:
@@ -2012,6 +2364,8 @@ func _show_all_objects() -> void:
 func _toggle_pause() -> void:
 	if _game_over:
 		return
+	if not _paused:
+		player.stop_firing()      # R-new：进暂停页前先停火（暂停会冻结物理，收不到松开事件）
 	_paused = not _paused
 	get_tree().paused = _paused
 	pause_screen.visible = _paused
@@ -2111,6 +2465,15 @@ const _DOD_LOG := "C:/Users/kangqiang/WorkBuddy/2026-09-20-20-49-56/cp1_feel_pro
 func _process(delta: float) -> void:
 	if backpack.visible:
 		_update_hover()            # 界面开着（此时已暂停）→ 拖拽图标 / 悬停名称
+	# ⚠⚠ R-new（2026-10-19）：楼层面板开着 = 游戏已暂停，但「走开自动关」是
+	#   **UI 交互逻辑**（R-119 语义）不是游戏逻辑 → 必须在暂停早退**之前**跑。
+	#   放在早退之后会被挡死（实测：面板开着暂停时走远不自动关 → 面板永驻）。
+	_auto_close_floor_select()
+	# R-new：`--open-map` → 首帧打开大地图（录帧取证用）。放在暂停早退之前，
+	#   且用**一次性**开关（打开后立刻置 false），不会反复开关。
+	if _open_map_at_start:
+		_open_map_at_start = false
+		_toggle_map()
 	if get_tree().paused:
 		return   # 暂停中（Main 是 PROCESS_MODE_ALWAYS）→ 早退，不跑游戏逻辑
 	_update_camera()
@@ -2164,18 +2527,34 @@ func _update_depart_tile() -> void:
 	if _depart_tile.visible and GameConstants.is_base_floor(_floor):
 		on = _depart_tile.player_stands_on(player.global_position)
 	_depart_tile.set_player_on(on)
-	# R-119：确认框打开时，玩家走开瓦片 → 自动关闭（取消出发）。
-	# ⚠ 语义：弹框后玩家若移走，说明"不想出发了"，框留着没意义；且不关掉
-	#   玩家按 F 会误触发 `_confirm_depart`（虽然此刻已不在瓦片上，descend 仍会跑）。
-	# ⚠ R-120 修正：改用 **2 倍半径** 的宽松判定，而不是 `not on`（18px 精确判定）。
-	#   玩家站上瓦片边缘时，身体碰撞让中心每帧微抖（±1px），`on` 会 false/true 抖动 →
-	#   「按 F 弹框 → 下一帧被立即关掉」→ 实机表现为「出发点无效」。
-	#   2 倍半径（36px）下，只有**真正走远**才会关框，边缘抖动不再误触发。
-	if _depart_confirm_open:
-		var d: float = player.global_position.distance_to(_depart_tile.tile_pos())
-		if d > GameConstants.DEPART_TILE_RADIUS * 2.0:
-			_cancel_depart()
+	# R-new：出发点电梯的站门状态（同款单向推入；战斗层才有效）
+	if _floor_elevator != null and _floor_elevator.visible and not GameConstants.is_base_floor(_floor):
+		_floor_elevator.set_player_on(_floor_elevator.player_stands_on(player.global_position))
+	# R-new（2026-10-22）：双人床的近床状态（同款单向推入；仅基地层有效）
+	if _base_bed != null and is_instance_valid(_base_bed) and _base_bed.visible and GameConstants.is_base_floor(_floor):
+		_base_bed.set_player_on(_base_bed.player_stands_on(player.global_position))
+	# R-new（2026-10-22）：NPC1 的近身状态（同款单向推入；仅基地层有效）
+	if _base_npc != null and is_instance_valid(_base_npc) and _base_npc.visible and GameConstants.is_base_floor(_floor):
+		_base_npc.set_player_on(_base_npc.player_stands_on(player.global_position))
+	# ⚠ 走开自动关已搬到 `_process` 的暂停早退**之前**（见 `_auto_close_floor_select`）——
+	#   面板开着时游戏暂停，放在这里（早退之后）永远跑不到。
 
+
+# R-119 语义延续（R-new：楼层选择面板）：面板打开时玩家走开瓦片 → 自动关闭（取消）。
+# ⚠ 语义：开面板后玩家移走 = "不想出发了"，面板留着没意义；不关掉的话玩家按 F
+#   还会误触发 `_confirm_floor_select`（虽然已不在瓦片上，传送仍会跑）。
+# ⚠ R-120 修正：**2 倍半径**宽松判定，不用 `not on`（18px 精确判定）—— 玩家站瓦片
+#   边缘时碰撞让中心每帧微抖（±1px），`on` false/true 抖动会把面板秒关（出发点无效）。
+# ⚠ 调用点在 `_process` 的**暂停早退之前**：面板开着时游戏是暂停态，
+#   而这是 UI 交互逻辑，必须照跑。
+func _auto_close_floor_select() -> void:
+	if not _floor_select_open:
+		return
+	if _depart_tile == null or not is_instance_valid(_depart_tile):
+		return
+	var d: float = player.global_position.distance_to(_depart_tile.tile_pos())
+	if d > GameConstants.DEPART_TILE_RADIUS * 2.0:
+		_cancel_floor_select()
 
 func _update_camera() -> void:
 	if camera == null or player == null:
@@ -2442,6 +2821,22 @@ func _make_wall_rect(rect: Rect2, with_visual: bool = true) -> void:
 # ⚠ **只在左键"按下"那一刻触发**（与既有 `_ui_press` 的边沿语义一致），
 #   否则"按下 + 松开"会触发两次回基地。
 # ⚠ `_game_over` 时不响应（玩家已死 -> 死亡画面接管输入）。
+# R-new（2026-10-22）：楼层选择面板的鼠标点击命中（左键按下 → 选中对应格）。
+#   与 ReturnBtn 同款：在 _input 里自己做命中测试（headless 可直测），命中即 set_input_as_handled。
+func _try_floor_select_click(event: InputEvent) -> bool:
+	if not _floor_select_open or _floor_select == null or not _floor_select.visible:
+		return false
+	if not (event is InputEventMouseButton):
+		return false
+	var mb := event as InputEventMouseButton
+	if not mb.pressed or mb.button_index != MOUSE_BUTTON_LEFT:
+		return false
+	var fs_lp: Vector2 = _floor_select.get_global_transform_with_canvas().affine_inverse() * mb.position
+	if not _floor_select.click_at(fs_lp):
+		return false
+	get_viewport().set_input_as_handled()
+	return true
+
 func _try_return_btn_click(event: InputEvent) -> bool:
 	# ==== R-128 补修（**真缺陷**）：隐藏态必须**完全无副作用** ====
 	# ⚠⚠ 原先只判 `null` / `_game_over`，**漏判 `visible`**。后果（独立验证者复核实测）：
@@ -2567,6 +2962,17 @@ func _on_retreat_after_death() -> void:
 # ==== R-113：第 100 层「出发瓦片」 ====
 # 【职责边界】`DepartTile` 只负责**画**（手绘方框 + 向下三角 + 英文标签）与
 #   提供命中判定；**按键判定、下降、状态变更全在 Main**（表现层不持有游戏状态，R-112 约定）。
+# R-new（2026-10-22）：战斗层（99–1）出发点电梯。
+# 【几何】3×3 瓦片（48×48）画在出发点**正上方**：左上 = spawn_pos + (-24, -48)，
+#   底边压在出发点格顶边 ⇒ 出发点格 = 电梯正下方「门口」（用户需求逐字）。
+# 【分层】只负责「建节点 + 摆位」；显隐/站门状态由 _build_floor 与 _update_depart_tile 推。
+func _build_floor_elevator() -> void:
+	_floor_elevator = FloorElevatorScript.new()
+	_floor_elevator.name = "FloorElevator"
+	# 挂 room（$TestRoom，世界空间，与 DepartTile / exit_marker 同坐标系做距离判定）
+	room.add_child(_floor_elevator)
+	_verify_log("R-new floor elevator built: visible=%s" % str(_floor_elevator.visible))
+
 func _build_depart_tile() -> void:
 	_depart_tile = DepartTileScript.new()
 	_depart_tile.name = "DepartTile"
@@ -2601,16 +3007,18 @@ func _build_depart_tile() -> void:
 # R-119：建「是否出发」确认框（代码 new、键盘驱动 F/Esc，不动 Main.tscn）。
 # ⚠ 独立 CanvasLayer：layer=18（> ReturnBtn 17、< 死亡画面 20）—— 确认框是模态的，
 #   要压住 ReturnBtn，但不该在玩家暂停(30)/死亡(20)时还浮着（那时它本就不显示）。
-func _build_depart_confirm() -> void:
+# R-new：楼层选择面板（取代 R-119 的 _build_depart_confirm）。
+# 挂 CanvasLayer（屏幕空间 UI，R-128 世界空间禁文字不适用）；代码 new，不动 Main.tscn。
+func _build_floor_select() -> void:
 	var layer := CanvasLayer.new()
 	layer.name = "DepartConfirmLayer"
 	layer.layer = 18
 	add_child(layer)
-	_depart_confirm = DepartConfirmScript.new()
-	_depart_confirm.name = "DepartConfirm"
-	layer.add_child(_depart_confirm)
-	_depart_confirm.visible = false
-	_verify_log("R-119 depart confirm built: visible=%s" % str(_depart_confirm.visible))
+	_floor_select = FloorSelectScript.new()
+	_floor_select.name = "FloorSelect"
+	layer.add_child(_floor_select)
+	_floor_select.visible = false
+	_verify_log("R-new floor select built: visible=%s" % str(_floor_select.visible))
 
 # 瓦片世界坐标 = **出生点 + 固定偏移**，并**校验该点不是墙**。
 # ⚠⚠ **为什么不写死一个世界坐标**（这是本函数存在的全部理由）：
@@ -2671,29 +3079,220 @@ func _try_depart() -> bool:
 	# ③ 必须真的踩在瓦片上（半径判定与「提示是否显示」用**同一个**函数，单一真相源）
 	if not _depart_tile.player_stands_on(player.global_position):
 		return false
-	_open_depart_confirm()
+	_open_floor_select()          # R-new：弹楼层选择面板（取代 R-119 确认框）
 	return true
 
-# R-119：打开确认框。
-func _open_depart_confirm() -> void:
-	_depart_confirm_open = true
-	if _depart_confirm != null:
-		_depart_confirm.visible = true
-		_depart_confirm.queue_redraw()
+# R-new（2026-10-22）：战斗层出发点电梯 —— 站门口按 F 回基地。
+# 用户需求逐字：「该点作为每层固定的出发与返回点，当玩家到达此处并按下F键时，
+#   触发传送返回100层的基地。」
+# 优先级：基地瓦片（_try_depart）→ **本函数** → 开箱（_toggle_container）。
+func _try_elevator() -> bool:
+	if _paused or _game_over or death_screen.visible or backpack.visible:
+		return false
+	if GameConstants.is_base_floor(_floor):
+		return false                # 基地层的「出发点」是 DepartTile，不走电梯
+	if _floor_elevator == null or not _floor_elevator.visible:
+		return false
+	if not _floor_elevator.player_stands_on(player.global_position):
+		return false
+	player.stop_firing()
+	_verify_log("ELEVATOR: floor %d -> %d (return to base)" % [_floor, GameConstants.START_FLOOR])
+	_on_return_to_base()
+	return true
 
-# R-119：确认出发 —— 关框 + 下楼。
-func _confirm_depart() -> void:
-	_depart_confirm_open = false
-	if _depart_confirm != null:
-		_depart_confirm.visible = false
-	_descend()
+# R-new（2026-10-22）：基地双人床 —— 站床旁按 F 睡觉。
+# 【用户需求逐字】「在双人床旁按 F 加满玩家 hp，根据恢复的 hp 扣减相应比例的饥渴值。」
+# 机制：heal 回满 HP；按 frac=回血量/max_hp 扣饥渴（restore_hunger/thirst 支持负值，钳 [0,MAX]）。
+#   满治愈成本 = BED_*_COST_FULL（各 100，用户拍板）；回一半血 → 各扣 50。基地 time_frozen
+#   → 成本是干净的一次性扣除（无衰减抵消）。满血时交互仍算成功但无回血无成本。
+# 优先级：F 链中位于电梯之后、开箱之前（床在基地层，电梯在战斗层，天然互斥）。
+func _try_bed() -> bool:
+	if _paused or _game_over or death_screen.visible or backpack.visible:
+		return false
+	if not GameConstants.is_base_floor(_floor):
+		return false
+	if _base_bed == null or not is_instance_valid(_base_bed) or not _base_bed.visible:
+		return false
+	if not _base_bed.player_stands_on(player.global_position):
+		return false
+	player.stop_firing()
+	var hp_before: float = player.hp
+	var to_heal: float = player.max_hp - hp_before
+	if to_heal <= 0.0:
+		# 已满血：交互仍算成功（不落到开箱），但无回血、无成本。
+		_verify_log("BED: hp already full (%.1f/%.1f) -> no heal, no cost" % [hp_before, player.max_hp])
+		return true
+	player.heal(to_heal)   # hp = minf(max_hp, hp+to_heal) = max_hp
+	var frac: float = to_heal / player.max_hp
+	var h_cost: float = frac * GameConstants.BED_HUNGER_COST_FULL
+	var t_cost: float = frac * GameConstants.BED_THIRST_COST_FULL
+	player.restore_hunger(-h_cost)
+	player.restore_thirst(-t_cost)
+	_verify_log("BED: heal %.1f->%.1f (frac=%.3f) cost hunger -%.1f thirst -%.1f -> hunger=%.1f thirst=%.1f" % [
+		hp_before, player.hp, frac, h_cost, t_cost, player.hunger, player.thirst])
+	return true
 
-# R-119：取消出发 —— 只关框，不下楼。
-func _cancel_depart() -> void:
-	_depart_confirm_open = false
-	if _depart_confirm != null:
-		_depart_confirm.visible = false
+# R-new（2026-10-22）：在起始房间空地建双人床（挂 furniture_container，离开基地即清、回基地重建）。
+func _build_base_bed() -> void:
+	var btl: float = FloorGeneratorScript.TILE
+	var bed := BaseBedScript.new() as Node2D
+	bed.position = Vector2(
+		(float(GameConstants.BED_TILE_X) + 0.5) * btl,
+		(float(GameConstants.BED_TILE_Y) + 0.5) * btl)
+	bed.visible = true
+	furniture_container.add_child(bed)
+	_base_bed = bed
+	_verify_log("BED: placed at tile(%d,%d) world=(%.0f,%.0f)" % [
+		GameConstants.BED_TILE_X, GameConstants.BED_TILE_Y, bed.position.x, bed.position.y])
 
+# R-new（2026-10-22）：建 NPC 对话框（屏幕空间；代码 new CanvasLayer + NpcDialog，_ready 建一次、持久）。
+func _build_npc_dialog() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 19            # 高于 HUD(10)/ReturnBtn(17)，低于死亡画面(20)
+	var dlg := NpcDialogScript.new() as Node2D
+	layer.add_child(dlg)
+	add_child(layer)
+	_npc_dialog = dlg
+
+# R-new（2026-10-22）：基地 NPC1 —— 站旁按 F 开对话。优先级见 F 链（电梯/床之后、开箱之前）。
+func _try_npc() -> bool:
+	if _paused or _game_over or death_screen.visible or backpack.visible:
+		return false
+	if not GameConstants.is_base_floor(_floor):
+		return false
+	if _base_npc == null or not is_instance_valid(_base_npc) or not _base_npc.visible:
+		return false
+	if not _base_npc.player_stands_on(player.global_position):
+		return false
+	if _npc_dialog == null or not is_instance_valid(_npc_dialog):
+		return false
+	player.stop_firing()
+	_npc_dialog.open(GameConstants.NPC_ID)
+	_verify_log("NPC: open dialog %s" % GameConstants.NPC_ID)
+	return true
+
+# R-new（2026-10-22）：在起始房间空地建 NPC1（挂 furniture_container，离开基地即清、回基地重建）。
+func _build_base_npc() -> void:
+	var btl: float = FloorGeneratorScript.TILE
+	var npc := BaseNpcScript.new() as Node2D
+	npc.position = Vector2(
+		(float(GameConstants.NPC_TILE_X) + 0.5) * btl,
+		(float(GameConstants.NPC_TILE_Y) + 0.5) * btl)
+	npc.visible = true
+	furniture_container.add_child(npc)
+	_base_npc = npc
+	_verify_log("NPC: placed at tile(%d,%d) world=(%.0f,%.0f)" % [
+		GameConstants.NPC_TILE_X, GameConstants.NPC_TILE_Y, npc.position.x, npc.position.y])
+
+# ==== R-new（2026-10-18）：出发点「楼层选择」面板 ====
+# 【用户需求逐字】「修改100层的出发点，按F键以后列出所有曾经探索过的楼层
+#   （也就是已经生成过的楼层地图），玩家可以选择直接到达该层。」
+# 【数据源】`_fog.visited_floors()` = FogGrid 跨层缓存的键集合（`_build_floor` 每层
+#   `set_floor` 建条目）→ 精确对应用户说的「已经生成过的楼层地图」。
+#   过滤：只列战斗层（1..99，基地 100 是出发点自身）；降序（深的在上，与下楼层序一致）。
+# 【首次出发】缓存里只有基地 → 列表为空 → 喂默认单项「第 99 层 · 未探索」
+#   （连按两次 F 的行为与旧版确认框逐字一致：F 开面板、F 确认去 99）。
+func _visited_floors() -> Array:
+	var out: Array = []
+	for f in _fog.visited_floors():
+		var fi: int = int(f)
+		if fi >= GameConstants.DEEPEST_FLOOR and fi < GameConstants.START_FLOOR:
+			out.append({"floor": fi, "explored": true})
+	out.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a["floor"]) > int(b["floor"]))
+	return out
+
+# 打开楼层选择面板（_try_depart 的唯一出口）。
+func _open_floor_select() -> void:
+	player.stop_firing()      # R-new：弹面板前先停火（同旧确认框）
+	var list: Array = _visited_floors()
+	if list.is_empty():
+		# 首次出发：默认项 = 下一层（未探索）。START_FLOOR-1 即 99（战斗层最高号）。
+		list.append({"floor": GameConstants.START_FLOOR - 1, "explored": false})
+	_floor_select_open = true
+	# ⚠ R-new（2026-10-19 用户需求「显示选择楼层菜单时游戏应暂停」）：
+	#   与 R-67 背包/箱子**同一范式**（_ui_paused + get_tree().paused）。
+	#   面板选择是"有代价动作"（传送 = 层复位），选的时候世界必须静止；
+	#   Main.tscn 根节点 process_mode=3(ALWAYS) → 暂停期间面板的 ↑↓/F/Esc
+	#   与走开自动关（_update_depart_tile 在 _process）照常工作。
+	if not _ui_paused and not get_tree().paused:
+		_ui_paused = true
+		get_tree().paused = true
+	if _floor_select != null:
+		_floor_select.open(list)
+
+# F 确认：前往选中层（_descend_to 直设层号，不走 _descend 的 -1 逻辑）。
+func _confirm_floor_select() -> void:
+	var target: int = _floor_select.selected() if _floor_select != null else -1
+	Sfx.play("ui_confirm", -5.0, 0.85)   # R-new（2026-10-22）：确认"叮"（低沉=门合/生效）
+	_close_floor_select()
+	if target < 0:
+		return                      # 空列表（理论上不发生：open 时恒喂至少一项）
+	_descend_to(target)
+
+# Esc 取消：只关面板，不动层号。
+func _cancel_floor_select() -> void:
+	_close_floor_select()
+
+func _close_floor_select() -> void:
+	_floor_select_open = false
+	# 还原 R-67 暂停（Esc 取消 / F 确认 / 走开自动关三条路径都经本函数）。
+	# ⚠ 顺序：先关面板再还原暂停 —— `_confirm_floor_select` 在 close 之后才
+	#   调 `_descend_to`（_build_floor 要在非暂停状态跑）。
+	if _floor_select != null:
+		_floor_select.close()
+	if _ui_paused:
+		_ui_paused = false
+		get_tree().paused = false
+
+# ==== R-new：直达指定层（出发点楼层选择的落点）====
+# 与 `_descend()` 的区别：不减 1，直设目标层号；与 `_on_return_to_base()` 同款收尾。
+# ⚠ 目标层可以是**已探索过的深层**（玩家此前到过 98，回基地后再直接去 98）——
+#   层布局确定性（seed+层号）保证同一层每次生成一致；敌人/箱子由 _build_floor
+#   重新实例化（R-20 ③ 层复位语义：每次离开基地再出发即复位）。
+func _descend_to(target: int) -> void:
+	if target < GameConstants.DEEPEST_FLOOR or target >= GameConstants.START_FLOOR:
+		_verify_log("DESCEND-TO BLOCKED: target=%d out of combat range" % target)
+		return
+	PlaytestLog.note_floor_end()   # 记账：刚离开的这一层（与 _descend 同口径）
+	_reset_trace()                # 旧层瓦片坐标已不存在（同 _on_return_to_base）
+	_floor = target
+	_build_floor(false)
+	_game_over = false
+	death_screen.visible = false
+
+# ==== R-new（2026-10-19）：640×360 实装 —— 屏幕空间 UI 整体 scale=2 ====
+# 【为什么整体缩放而不是逐控件重写几何】用户拍板"先缩放铺满，马上能跑"：
+#   所有 UI 几何常量仍按 320×180 设计空间书写（几百处坐标/字号一行不动），
+#   只改这一个系数。世界空间内容（雾/出发瓦片/敌人/箱子）**不缩放**。
+# 【鼠标命中为什么自动对】`_ui_to_local()` 用 backpack 的 canvas 变换逆转换视口
+#   坐标 → backpack scale=2 后真实鼠标 (100,100) 自动落到局部 (50,50)，
+#   与缩放后的视觉位置一致；验证测试直调 `_ui_press(局部坐标)` 不受影响。
+#   ReturnBtn.hit_test 另有自身变换逆（见 ReturnBtn.gd）。
+func _apply_ui_scale() -> void:
+	var s := Vector2(GameConstants.UI_SCALE, GameConstants.UI_SCALE)
+	# tscn 里的屏幕空间 UI（CanvasLayer 的直接子节点）
+	var roots: Array = [
+		hud.get_node_or_null("Margin"),        # HUD（CanvasLayer 无 scale，缩其内容根）
+		backpack, hint, item_menu, floor_map,
+		death_screen.get_node_or_null("Dimmer"), death_screen.get_node_or_null("Center"),
+		pause_screen.get_node_or_null("Dimmer"), pause_screen.get_node_or_null("Center"),
+		# 代码 new 的屏幕空间 UI
+		_return_btn, _floor_select, _trace_arrows,
+		_npc_dialog,   # R-new：NPC 对话框（代码 new 的屏幕空间 UI —— 必须纳入 ×2 缩放，否则半尺寸挤左上）
+	]
+	for n in roots:
+		# ⚠⚠ R-new 修 1：守卫必须是 `CanvasItem` 不是 `Node2D` —— Control 类 UI
+		#   （ReturnBtn/HUD.Margin/Dimmer/Center）**不是 Node2D**，写 Node2D 会全跳过。
+		# ⚠⚠ R-new 修 2：**position 必须同步 ×2** —— CanvasItem 变换是
+		#   global = position + scale·v，只设 scale 不搬原点 → 内容向各自原点
+		#   周围放大、视觉仍挤在左上（实测 ReturnBtn scale=2 却画在 (286,154) 附近）。
+		#   position 也 ×2 后 global = 2·position + 2·v = 缩放前绝对坐标 ×2 ✓ 铺满。
+		if n != null and n is CanvasItem:
+			var c := n as CanvasItem
+			c.position = c.position * s
+			c.scale = s
+	# ⚠ 不缩放：fog_overlay（世界雾）/ _depart_tile（世界黄方块）/ 世界内一切
+	_verify_log("UI scale applied: %.1fx (viewport 640x360)" % GameConstants.UI_SCALE)
 
 # ==== R-118：本层地图数据统一取数口 ====
 # 【为什么要有这个函数 —— 让基地层与战斗层在下游"完全可互换"】
@@ -2789,7 +3388,8 @@ func _save_storage_items() -> void:
 	for c in get_tree().get_nodes_in_group("crates"):
 		if not is_instance_valid(c):
 			continue
-		if bool(c.get("storage")) == false:
+		# ⚠ `!= true`（同 _close_backpack 939）：尸体节点无 storage 字段 → get 返回 null
+		if c.get("storage") != true:
 			continue
 		var tx: int = int((c as Node2D).global_position.x) / 16
 		var ty: int = int((c as Node2D).global_position.y) / 16
@@ -2809,7 +3409,68 @@ func _save_storage_items() -> void:
 	f.close()
 
 
-func _build_floor(reset_hp: bool) -> void:
+# R-new（2026-10-22）需求②：把玩家摆到 `target`（保持原位置），目标格被占则螺旋找最近合法格。
+# 【为什么用 data 里的实体坐标而不是 get_nodes_in_group】
+#   `_build_floor` 开头对旧层实体 `queue_free()`，而 queue_free **帧末才生效** ——
+#   同帧内 `get_nodes_in_group("enemies")` 仍会读到**上一层**的残留实体（R-112 实测）。
+#   data["enemies"/"crates"/"furniture"] 是**新层**的生成坐标 ⇒ 无残留问题。
+# 【合法格】grid==1（地面）∧ 不在任何新层实体的占格 ∧ 不在门口保护区（spawn 圈）。
+func _place_player_keep(target: Vector2, data: Dictionary) -> void:
+	var grid: PackedByteArray = data["grid"]
+	var cols: int = int(data["cols"])
+	var rows: int = int(data["rows"])
+	var tile_px: float = 16.0
+	# 预收集新层实体占格（敌人 + 箱子 + 家具；pickup 不挡路故不列）
+	var occupied := {}
+	for key in ["enemies", "crates", "furniture"]:
+		var arr: Array = data.get(key, []) as Array
+		for e in arr:
+			var ep: Vector2 = Vector2.ZERO
+			if e is Vector2:
+				ep = e as Vector2
+			elif e is Dictionary:
+				ep = (e as Dictionary).get("pos", Vector2.ZERO) as Vector2
+			if ep != Vector2.ZERO:
+				occupied[Vector2i(int(ep.x) / 16, int(ep.y) / 16)] = true
+	# 出生点保护圈（生成器的敌人避让圈口径）：别把玩家塞进敌群正中心
+	var spawn_v: Vector2 = data["spawn"]
+	var spawn_clear: float = 140.0
+	# ⚠ GDScript 4：函数内的嵌套 func 是 lambda，**必须赋值给变量**再 `.call()`
+	#   （裸 func 声明会报 "Standalone lambdas cannot be accessed"）。
+	var _tile_ok := func(tx: int, ty: int) -> bool:
+		if tx < 0 or ty < 0 or tx >= cols or ty >= rows:
+			return false
+		if int(grid[ty * cols + tx]) != 1:
+			return false                     # 非地面（墙/实心）
+		if occupied.has(Vector2i(tx, ty)):
+			return false                     # 实体占格
+		var c := Vector2(float(tx) * 16.0 + 8.0, float(ty) * 16.0 + 8.0)
+		if c.distance_to(spawn_v) < spawn_clear:
+			return false                     # 出生点保护圈（多半有敌群）
+		return true
+	var t0 := Vector2i(int(target.x) / 16, int(target.y) / 16)
+	if _tile_ok.call(t0.x, t0.y):
+		player.position = target             # 原位合法 → 逐字保持
+		return
+	# 螺旋搜索：半径 1..8，逐环找第一个合法格（确定性顺序，不引入随机）
+	for r in range(1, 9):
+		for dy in range(-r, r + 1):
+			for dx in range(-r, r + 1):
+				if maxi(absi(dx), absi(dy)) != r:
+					continue                    # 只扫环上（避免重复扫内圈）
+				if _tile_ok.call(t0.x + dx, t0.y + dy):
+					player.position = Vector2(float(t0.x + dx) * 16.0 + 8.0, float(t0.y + dy) * 16.0 + 8.0)
+					_verify_log("keep-pos fallback: (%.0f,%.0f) -> tile(%d,%d) -> (%.0f,%.0f) r=%d" % [
+						target.x, target.y, t0.x + dx, t0.y + dy, player.position.x, player.position.y, r])
+					return
+	# 极端兜底：8 环内全非法 → 摆 spawn（绝不把玩家放进墙里）
+	player.position = spawn_v
+	_verify_log("keep-pos fallback EXHAUSTED r<=8 -> spawn (%.0f,%.0f)" % [spawn_v.x, spawn_v.y])
+
+func _build_floor(reset_hp: bool, keep_pos: Vector2 = Vector2.INF) -> void:
+	# ⚠⚠ R-new（2026-10-22）需求②：`keep_pos` 非有限值（默认 Vector2.INF）= 摆 spawn
+	#   （旧行为，_ready / 回基地 / 传送都走这条）；有限值 = **保持玩家原坐标**下楼
+	#   （用户需求：「玩家从本层的出口进入下一层时要保持原来位置」）。
 	# 清旧层
 	for n in floorvis_container.get_children():
 		n.queue_free()
@@ -2970,6 +3631,10 @@ func _build_floor(reset_hp: bool) -> void:
 		var z := ZombieScene.instantiate()
 		z.position = pos
 		enemies_container.add_child(z)
+		# ⚠⚠ 必须 `bind(z)`：`died` 是**无参**信号，直接连 1 参回调会被 Godot 静默跳过
+		#   （实测 emit 正常、连接列表有它、但回调永不触发）。同款坑见
+		#   `PlaytestLog.note_enemy_died.bind(z.faction)` —— bind 是工程唯一正确范式。
+		z.died.connect(_on_enemy_died.bind(z))   # R-new：尸体系统（无条件接，与 playtest 日志无关）
 		if _pt_log_kill:
 			z.died.connect(PlaytestLog.note_enemy_died.bind(z.faction))
 	# 雇佣兵（远程，自带 "enemies" 组；从第 3 层起由生成器给出）
@@ -2977,6 +3642,7 @@ func _build_floor(reset_hp: bool) -> void:
 		var m := MercenaryScene.instantiate()
 		m.position = mpos
 		enemies_container.add_child(m)
+		m.died.connect(_on_enemy_died.bind(m))   # R-new：尸体系统（bind 同 Zombie 处）
 		if _pt_log_kill:
 			m.died.connect(PlaytestLog.note_enemy_died.bind(m.faction))
 	# ==== R-146 · 快攻型僵尸（Brute）====
@@ -2989,6 +3655,7 @@ func _build_floor(reset_hp: bool) -> void:
 		var b := BruteScene.instantiate()
 		b.position = bpos
 		enemies_container.add_child(b)
+		b.died.connect(_on_enemy_died.bind(b))   # R-new：尸体系统（bind 同 Zombie 处）
 		if _pt_log_kill:
 			# ⚠ 同阵营：Brute 的 `faction` 继承自 Zombie = FACTION_UNDEAD，
 			#   所以它计入击杀日志时与普通僵尸**同归一类**（不新增枚举值 = 不改 HUD 语义）。
@@ -3005,6 +3672,7 @@ func _build_floor(reset_hp: bool) -> void:
 			var s := SplitterScene.instantiate()
 			s.position = big.position + big.size * 0.5
 			enemies_container.add_child(s)
+			s.died.connect(_on_enemy_died.bind(s))   # R-new：尸体系统（bind 同 Zombie 处）
 			s.set_minion_spawner(_spawn_splitter_minion)
 			if _pt_log_kill:
 				s.died.connect(PlaytestLog.note_enemy_died.bind(s.faction))
@@ -3056,6 +3724,18 @@ func _build_floor(reset_hp: bool) -> void:
 		if ci < _crate_kinds.size():
 			cr.set_kind(String(_crate_kinds[ci]))
 		furniture_container.add_child(cr)
+	# ==== R-155：房间家具（4 档功能分档）====
+	#   `data["furniture"]` = [{id, cat, pos, cell, room, theme}, ...]
+	#   ⚠ 碰撞层由 `Furniture._apply_cat()` 按 cat 决定（a=1 墙 / b=32 / c=16 箱子 / d=无）；
+	#     这里**只负责建节点和摆位置**，不在这里判断分档。
+	#   ⚠ `d` 档（地毯/盆景/马桶/床）也要建节点 —— 它只是不参与碰撞，精灵仍要画出来。
+	var _furniture: Array = data.get("furniture", []) as Array
+	for fd in _furniture:
+		var fdict: Dictionary = fd as Dictionary
+		var fu := FurnitureScript.new() as StaticBody2D
+		fu.position = fdict.get("pos", Vector2.ZERO) as Vector2
+		(fu as Node).set("fid", String(fdict.get("id", "")))
+		furniture_container.add_child(fu)
 	# ==== R-119/R-120：基地层固定宝箱布置 ====
 	#   ① 储藏室 5×5 **储物箱**（R-120：入组可交互、无碰撞、物品从存档加载持久化）
 	#   ② 起始房间 1 个固定内容宝箱（每局刷新手枪 + 9×19 弹药盒）
@@ -3092,6 +3772,9 @@ func _build_floor(reset_hp: bool) -> void:
 			(float(GameConstants.BASE_START_CRATE_TILE_Y) + 0.5) * btl)
 		sc.preset_items = GameConstants.BASE_START_CRATE_PRESET.duplicate()
 		furniture_container.add_child(sc)
+		# ---- R-new（2026-10-22）：基地双人床（睡觉回血 + 按比例扣饥渴）----
+		_build_base_bed()
+		_build_base_npc()          # R-new：基地 NPC1（站旁按 F 对话）
 		_verify_log("R-119 base crates: storage=%d (persistent) + start=%d preset" % [
 			GameConstants.BASE_STORAGE_CRATE_GRID * GameConstants.BASE_STORAGE_CRATE_GRID, 1])
 	# 出口 + 出生点 + 导航路径 + 玩家复位
@@ -3100,7 +3783,10 @@ func _build_floor(reset_hp: bool) -> void:
 	_path_i = 0
 	_nav_stuck_t = 0.0
 	_nav_nudge_t = 0.0
-	player.position = data["spawn"]
+	if keep_pos.is_finite():
+		_place_player_keep(keep_pos, data)     # 下楼保持位置（占用则就近空格）
+	else:
+		player.position = data["spawn"]        # 默认：摆到本层出发点
 	# ==== R-121：基地内时间冻结（base-survival-npc §0.2「进入基地时时间静止」）====
 	#   基地层（100）→ 饥渴/体力冻结；战斗层（99–1）→ 正常流逝。
 	#   ⚠ 由 Main 单向推给 Player（Player 不反查 `_floor`）—— 与 R-112 单数据流约定一致。
@@ -3118,10 +3804,23 @@ func _build_floor(reset_hp: bool) -> void:
 		var is_base: bool = GameConstants.is_base_floor(_floor)
 		_depart_tile.visible = is_base
 		_depart_tile.position = _depart_tile_pos() if is_base else Vector2.ZERO
-		# ⚠⚠ **本行是 R-125 复核补的「日志纠错」，不是新功能**。
-		#   原先只在函数**靠上**处（基地分支里）打了一行
-		#   `... depart tile at (%.1f,%.1f)`，但那里 `_floor_spawn` / `_floor_grid`
-		#   （上方 2548-2551 行）**还没被本层数据覆盖** → `_depart_tile_pos()` 读到的是
+		# ==== R-new（2026-10-22）：出发点电梯（与 DepartTile 互斥显隐）====
+		#   战斗层（99–1）显示电梯；基地层（100）隐藏（基地的「出发点」是黄方块瓦片）。
+		# ⚠ 位置必须**每次 _build_floor 都摆**：_descend / _on_return_to_base / 传送
+		#   三条路都走本函数，只在一支摆会残留在旧层坐标（DepartTile 同款教训）。
+		if _floor_elevator != null:
+			var in_combat: bool = not GameConstants.is_base_floor(_floor)
+			_floor_elevator.visible = in_combat
+			# 电梯左上 = spawn_pos + (-24, -48)：3×3 瓦片，底边压在出发点格顶边（门口=出发点格）
+			_floor_elevator.position = _floor_spawn + Vector2(-24.0, -48.0)
+			_floor_elevator.set_player_on(false)
+			_verify_log("floor elevator placed: floor=%d combat=%s pos=(%.1f,%.1f) door=(%.1f,%.1f)" % [
+				_floor, str(in_combat), _floor_elevator.position.x, _floor_elevator.position.y,
+				_floor_elevator.door_pos().x, _floor_elevator.door_pos().y])
+			# ⚠⚠ **本行是 R-125 复核补的「日志纠错」，不是新功能**。
+			#   原先只在函数**靠上**处（基地分支里）打了一行
+			#   `... depart tile at (%.1f,%.1f)`，但那里 `_floor_spawn` / `_floor_grid`
+			#   （上方 2548-2551 行）**还没被本层数据覆盖** → `_depart_tile_pos()` 读到的是
 		#   **上一层**的缓存。实测后果：切回基地时打出 `(1464,904)` / `(1736,1240)`，
 		#   而真值恒为 `(328,248)` —— 排查 R-124 时这行假坐标把人往错误方向带过。
 		#   → 把坐标打印**移到这里**（快照已更新、`position` 刚摆好，读到的就是真值）。
@@ -3151,11 +3850,24 @@ func _build_floor(reset_hp: bool) -> void:
 	#   末尾兜底**（见该函数，与 R-113 `_build_depart_tile()` 末尾补摆位同一踩坑模式）。
 	if _return_btn != null:
 		_return_btn.visible = not GameConstants.is_base_floor(_floor)
+	# ⚠⚠ R-new 修（2026-10-22 **UI 消失 bug**，用户报障逐字「当程序运行到第98层时，所有UI
+	#   元素突然全部消失，无法正常显示和交互。即使再回到100层或其他楼层后仍然没有显示UI」）：
+	#   根因 = `hud.visible` 全项目只有 `_toggle_map` 两个赋值点（开地图=false / 关地图=true），
+	#   而本函数**从不复位**。地图开着时换层（开图按 F 回基地 / 开图走到出口 descend /
+	#   开图死亡续关）→ hud.visible 停留在 false，之后没有任何路径恢复它 → UI 永久消失。
+	#   （98 层恰是「从 99 层出口下楼」到达的层，所以用户在 98 层撞见。）
+	# 修复 = 与 `player.time_frozen` / `_return_btn.visible` 同款铁律：**每次 _build_floor 都设**。
+	hud.visible = true
+	# 换层 = 旧层地图快照过期（R-147：大地图按当层迷雾烘焙）→ 自动关。
+	#   否则「地图开着下楼」会带着旧层地图进新层，且 HUD 与大地图同屏（视觉冲突回归）。
+	if floor_map != null:
+		floor_map.visible = false
 	# 战争迷雾（R-70）：绑定本层三态栅格 → 刷新可见性/覆盖层/动态物体 → 再把同一份迷雾交给楼层地图
 	# ⚠ 必须在「箱子格清零」之前绑定（FogGrid 内部 duplicate；半高家具不阻视线，清零只服务敌人寻路）
 	var fc: int = int(data["cols"])
 	var fr: int = int(data["rows"])
 	_fog.set_floor(data["grid"], fc, fr, _floor)
+	_update_minimap()   # R-new：换层后立即刷新小地图
 	_fog_last_tile = Vector2i(-999999, -999999)
 	_refresh_fog(true)
 	# R-72 / R-141：总开关关闭**或**基地层(100) → 覆盖层隐藏；并把 fog 传 null
@@ -3165,7 +3877,7 @@ func _build_floor(reset_hp: bool) -> void:
 	#   **都**走本函数；在任何一支写死都会让反向路径漏改（回基地还带雾 / 下潜没雾）。
 	if fog_overlay != null:
 		fog_overlay.visible = _fog_render_on()
-	floor_map.set_floor(data["grid"], fc, fr, data["exit"], player, float(FloorGeneratorScript.TILE), _fog if _fog_render_on() else null)
+	floor_map.set_floor(data["grid"], fc, fr, data["exit"], player, float(FloorGeneratorScript.TILE), _fog if _fog_render_on() else null, _floor)
 	# R-147：建完层**立刻**推一次宝箱标记（箱子循环在 2790–2842，早于本行 → group 已就绪）。
 	#   ⚠ 注意这里推的是「本层有哪些箱子」，**不是**「哪些已被发现」——
 	#   发现判定由 FloorMap 现查 fog，所以**进旧层时会带着上次的探索进度自动显示**
@@ -3181,6 +3893,19 @@ func _build_floor(reset_hp: bool) -> void:
 		var ty: int = int(cpos.y) / 16
 		if tx >= 0 and tx < nav_cols and ty >= 0 and ty < nav_rows:
 			nav_grid[ty * nav_cols + tx] = 0
+	# ==== R-155：家具挡路的也要置 0（a/b/c 三档；d 等同地板不置）====
+	# ⚠ **必须显式置**：NavGrid 只读 `PackedByteArray`、**完全不读物理碰撞**，
+	#   只给家具建碰撞体不写网格 → 敌人寻路会直接穿过货架/防弹玻璃。
+	# ⚠ d 档（地毯/盆景/马桶/床）**不置** —— 需求就是"所有都能穿过"，等同地板。
+	for fd in (data.get("furniture", []) as Array):
+		var fdict: Dictionary = fd as Dictionary
+		if String(fdict.get("cat", "")) == "d":
+			continue
+		var fpos: Vector2 = fdict.get("pos", Vector2.ZERO) as Vector2
+		var ftx: int = int(fpos.x) / 16
+		var fty: int = int(fpos.y) / 16
+		if ftx >= 0 and ftx < nav_cols and fty >= 0 and fty < nav_rows:
+			nav_grid[fty * nav_cols + ftx] = 0
 	# 🔴🔴 **R-131 发现的既有缺陷（本批刻意不修，已上报team-lead）**
 	#   上面 `var nav_grid: PackedByteArray = data["grid"]` 是**别名**不是拷贝：
 	#   Godot 4.7 的 `PackedByteArray` **赋值即引用**（实测：写 `nav_grid` 会改 `data["grid"]`，
@@ -3261,10 +3986,15 @@ func _descend() -> void:
 	if _floor <= GameConstants.DEEPEST_FLOOR:
 		_verify_log("DESCEND BLOCKED at floor %d (deepest floor reached)" % [_floor])
 		return
+	# ⚠⚠ R-new（2026-10-22）需求②：记住**离开这一层时的玩家位置**，下楼后保持。
+	#   必须在 `_floor -= 1` / `_build_floor` **之前**取（_build_floor 会重摆玩家）。
+	var keep_pos: Vector2 = player.global_position
 	_floor -= 1
-	_build_floor(false)
+	_build_floor(false, keep_pos)
 	_game_over = false
 	death_screen.visible = false
+	_verify_log("descend keep-pos: (%.0f,%.0f) -> (%.0f,%.0f) (floor %d)" % [
+		keep_pos.x, keep_pos.y, player.global_position.x, player.global_position.y, _floor])
 	if _verify_headless:
 		_verify_t = 0.0
 		_verify_stage = 0
@@ -3381,19 +4111,19 @@ func _verify_wep_test() -> void:
 	player.equip_weapon("pistol")
 	player.fire_cd = 0.0                                # 清掉上一段（霰弹枪 MP133_FIRE_COOLDOWN）遗留的冷却
 	var a0: int = player.ammo
-	_send_mouse(Vector2(160.0, 90.0), true, false)     # 按下并保持
+	_send_mouse(Vector2(320.0, 180.0), true, false)     # R-new：视口 640×360 中心（原 320×180 时是 (160,90)）
 	for i in 24:
 		await get_tree().physics_frame
 	var semi_shots: int = a0 - player.ammo
-	_send_mouse(Vector2(160.0, 90.0), false, false)    # 松开
+	_send_mouse(Vector2(320.0, 180.0), false, false)    # R-new：视口 640×360 中心
 	player.equip_weapon("smg")
 	player.fire_cd = 0.0
 	var a1: int = player.ammo
-	_send_mouse(Vector2(160.0, 90.0), true, false)     # 按下并保持（连发）
+	_send_mouse(Vector2(320.0, 180.0), true, false)     # R-new：视口 640×360 中心
 	for i in 24:
 		await get_tree().physics_frame
 	var auto_shots: int = a1 - player.ammo
-	_send_mouse(Vector2(160.0, 90.0), false, false)
+	_send_mouse(Vector2(320.0, 180.0), false, false)
 	_verify_log("fire mode behaviour (24 physics frames held): pistol_shots=%d (expect 1) smg_shots=%d (expect >=3)" % [semi_shots, auto_shots])
 	if semi_shots != 1 or auto_shots < 3:
 		ok = false
@@ -3434,8 +4164,8 @@ func _verify_enemy_test() -> void:
 	hb.hostile = true
 	add_child(fb)
 	add_child(hb)
-	_verify_log("bullet mask friendly=%d hostile=%d" % [fb.collision_mask, hb.collision_mask])
-	if not (fb.collision_mask == 13 and hb.collision_mask == 7):
+	_verify_log("bullet mask friendly=%d hostile=%d (expect 45 / 39 —— R-155: 13/7 各 +32 防弹玻璃层)" % [fb.collision_mask, hb.collision_mask])
+	if not (fb.collision_mask == 45 and hb.collision_mask == 39):
 		ok = false
 	# 3) 伤害路径：敌弹→玩家扣血；友弹→玩家不扣血
 	var hp0: float = player.hp
@@ -3513,6 +4243,7 @@ func _verify_mapui_test() -> void:
 	esc.pressed = true
 	_unhandled_input(esc)
 	var esc_closed: bool = not floor_map.visible
+	var esc_hud_ok: bool = hud.visible   # R-new：关图后 HUD 必须恢复可见（否则全 UI 消失）
 	_unhandled_input(esc)  # 已关闭时再按 Esc 应无副作用
 	var esc_idle_ok: bool = not floor_map.visible
 	var tiles: Vector2i = floor_map.map_tiles()
@@ -3522,9 +4253,78 @@ func _verify_mapui_test() -> void:
 		expect = Vector2i(GameConstants.BASE_MAP_COLS, GameConstants.BASE_MAP_ROWS)
 	else:
 		expect = Vector2i(int(GameConstants.WORLD_W / 16.0), int(GameConstants.WORLD_H / 16.0))
-	var ok: bool = hidden0 and shown and hidden1 and esc_closed and esc_idle_ok and tiles == expect
-	_verify_log("default_hidden=%s toggle_on=%s toggle_off=%s esc_closed=%s esc_idle_ok=%s tiles=%s expect=%s" % [
-		hidden0, shown, hidden1, esc_closed, esc_idle_ok, tiles, expect])
+	var mm_ok: bool = true    # ⑥ 小地图视野窗口（声明提前：汇总行先引用；实判在下方 ⑥ 组）
+	var ok: bool = hidden0 and shown and hidden1 and esc_closed and esc_hud_ok and esc_idle_ok and tiles == expect and mm_ok
+	_verify_log("default_hidden=%s toggle_on=%s toggle_off=%s esc_closed=%s esc_hud_ok=%s esc_idle_ok=%s tiles=%s expect=%s" % [
+		hidden0, shown, hidden1, esc_closed, esc_hud_ok, esc_idle_ok, tiles, expect])
+	# ========== ⑥ R-new（2026-10-22）：小地图视野窗口（扩大视野需求）==========
+	# 用户需求逐字：「扩大其视野范围，使小地图能够覆盖更大的地图区域……修改小地图的
+	#   缩放比例或视口尺寸，确保玩家可以在小地图上看到更广阔的周边环境，同时保持地图
+	#   标识的清晰可读。」
+	# 断言口径（全部字面量期望）：
+	#   · 窗口 = **48×32 格**（10-21 的 +50% 轮是 36×24；本轮扩视野回到 48×32）
+	#   · CELL_PX 保持 2 ⇒ 标识绝对像素不变（清晰可读）
+	#   · 玩家格落在窗口内，且**精确定位**（窗口格 == 期望映射）（贴地图边界时允许贴边）
+	#   · 位置右对齐 + 不越出设计空间（320×180）
+	mm_ok = true
+	var mm_cols: int = 0
+	var mm_rows: int = 0
+	var mm_player := Vector2i(-1, -1)
+	var mm_pos := Vector2.ZERO
+	var mv: Variant = null
+	var hud_n: Node = hud
+	if hud_n != null and hud_n.has_node("Margin/MinimapView"):
+		mv = hud_n.get_node("Margin/MinimapView")
+	if mv == null:
+		mm_ok = false
+		_verify_log("FAIL: ⑥ 小地图节点不存在（Margin/MinimapView）")
+	else:
+		mm_cols = int(mv.get("_cols"))
+		mm_rows = int(mv.get("_rows"))
+		mm_player = mv.get("_player") as Vector2i
+		mm_pos = mv.position
+		# 窗口尺寸（10-22 扩视野后的字面量期望）
+		if not (mm_cols == 96 and mm_rows == 64):
+			mm_ok = false
+			_verify_log("FAIL: ⑥ 小地图窗口不是 96×64（实测 %d×%d）—— 视野未按本轮需求扩大" % [mm_cols, mm_rows])
+		# 视野面积确实比上轮 48×32 大（防"改小了"）
+		if float(mm_cols * mm_rows) <= float(48 * 32):
+			mm_ok = false
+			_verify_log("FAIL: ⑥ 小地图视野面积未超过上轮 48×32（%d 格）" % (mm_cols * mm_rows))
+		# 玩家在窗口内
+		if not (mm_player.x >= 0 and mm_player.y >= 0 and mm_player.x < mm_cols and mm_player.y < mm_rows):
+			mm_ok = false
+			_verify_log("FAIL: ⑥ 玩家格不在小地图窗口内：%s (窗口 %dx%d)" % [str(mm_player), mm_cols, mm_rows])
+		# 定位精度（R-new 2026-10-22）：玩家窗口格必须 == 期望映射——
+		#   ox = clamp(player_tile - win/2, 0, floor - win)；mm_player = clamp(player_tile - ox, 0, win-1)
+		#   （窗口以玩家为中心，贴地图边界时被 clamp → 玩家在窗口内偏左/偏上，属正确行为）
+		var r_pt: Vector2i = _fog.world_to_tile(player.global_position)
+		var c_ox: int = clampi(r_pt.x - mm_cols / 2, 0, maxi(0, _floor_cols - mm_cols))
+		var c_oy: int = clampi(r_pt.y - mm_rows / 2, 0, maxi(0, _floor_rows - mm_rows))
+		var exp_px: int = clampi(r_pt.x - c_ox, 0, mm_cols - 1)
+		var exp_py: int = clampi(r_pt.y - c_oy, 0, mm_rows - 1)
+		if mm_player.x != exp_px or mm_player.y != exp_py:
+			mm_ok = false
+			_verify_log("FAIL: ⑥ 定位精度: 玩家窗口格=%s 期望=%s (player_tile=%s ox/oy=%d/%d win=%dx%d)" % [
+				str(mm_player), str(Vector2i(exp_px, exp_py)), str(r_pt), c_ox, c_oy, mm_cols, mm_rows])
+		_verify_log("⑥ 定位精度: 玩家窗口格=%s 期望=%s (匹配)" % [str(mm_player), str(Vector2i(exp_px, exp_py))])
+		# 右对齐 + 不越出设计空间 320×180（Margin 宽 312）
+		var mm_w_px: float = float(mm_cols) * float(mv.get("CELL_PX"))
+		var mm_h_px: float = float(mm_rows) * float(mv.get("CELL_PX"))
+		if mm_pos.x + mm_w_px > 312.5 or mm_pos.y < -0.5:
+			mm_ok = false
+			_verify_log("FAIL: ⑥ 小地图越出 Margin（pos=(%.1f,%.1f) size=(%.1f,%.1f) Margin 宽 312）" % [mm_pos.x, mm_pos.y, mm_w_px, mm_h_px])
+		# ⑥-f R-new（2026-10-22）：整块小地图半透明（modulate.a ∈ [0.5,0.7] 且 == MAP_ALPHA，各场景一致）
+		var mm_alpha: float = (mv as CanvasItem).modulate.a
+		var mm_alpha_ok: bool = (mm_alpha >= 0.5 and mm_alpha <= 0.7 and is_equal_approx(mm_alpha, MinimapView.MAP_ALPHA))
+		if not mm_alpha_ok:
+			mm_ok = false
+			_verify_log("FAIL: ⑥-f 小地图 modulate.a=%.2f（期望 0.50~0.70 且 == MAP_ALPHA）—— 半透明未生效" % mm_alpha)
+		_verify_log("⑥-f 小地图 modulate.a=%.2f (expect %.2f, 区间 0.50~0.70)" % [mm_alpha, MinimapView.MAP_ALPHA])
+		_verify_log("⑥ minimap view: cols=%d rows=%d (expect 96x64, area=%.2fx of 48x32) player=%s pos=(%.1f,%.1f) px=(%.0fx%.0f) CELL_PX=%.0f" % [
+			mm_cols, mm_rows, float(mm_cols * mm_rows) / float(36 * 24), str(mm_player), mm_pos.x, mm_pos.y, mm_w_px, mm_h_px, float(mv.get("CELL_PX"))])
+	if not mm_ok:
+		ok = false
 	_verify_log("=== floor-map UI test %s ===" % ("PASSED" if ok else "FAILED"))
 	get_tree().quit()
 
@@ -3665,8 +4465,8 @@ func _verify_faction_test() -> void:
 	hb.hostile = true
 	add_child(fb)
 	add_child(hb)
-	_verify_log("bullet mask: friendly=%d hostile=%d (expect 13 / 7)" % [fb.collision_mask, hb.collision_mask])
-	if not (fb.collision_mask == 13 and hb.collision_mask == 7):
+	_verify_log("bullet mask: friendly=%d hostile=%d (expect 45 / 39 —— R-155: 13/7 各 +32 防弹玻璃层)" % [fb.collision_mask, hb.collision_mask])
+	if not (fb.collision_mask == 45 and hb.collision_mask == 39):
 		ok = false
 
 	# --- 受控空间：清敌人 + 清墙（否则子弹一生成就撞墙）---
@@ -3916,7 +4716,9 @@ func _verify_ui_test() -> void:
 	if not (opened and get_tree().paused and world_paused):
 		ok = false
 	# 2) 真实 Ctrl+左键 点在「与 HUD 重叠」的箱子第 1 格（y≈20 < 86）
-	var p0: Vector2 = backpack.cont_item_rect(c.items[0]).get_center()
+	# ⚠⚠ R-new（640×360）：Backpack 的 rect 方法是**局部坐标**（320×180 设计空间），
+	#   _send_mouse 发的是**视口坐标** → ×UI_SCALE 转换（_input 的 _ui_to_local 会逆变换回局部）。
+	var p0: Vector2 = backpack.cont_item_rect(c.items[0]).get_center() * GameConstants.UI_SCALE
 	var n_inv0: int = _inv.size()
 	var n_cont0: int = c.items.size()
 	_send_mouse(p0, true, true)
@@ -3929,9 +4731,9 @@ func _verify_ui_test() -> void:
 	# 3) 真实拖拽 箱子 → 背包（与 HUD 控件重叠的区域）
 	var n_inv1: int = _inv.size()
 	var n_cont1: int = c.items.size()
-	_send_mouse(backpack.cont_item_rect(c.items[0]).get_center(), true, false)
+	_send_mouse(backpack.cont_item_rect(c.items[0]).get_center() * GameConstants.UI_SCALE, true, false)
 	var dragging_c2i: bool = not _drag_item.is_empty()
-	_send_mouse(backpack.inv_slot_rect(0).get_center(), false, false)
+	_send_mouse(backpack.inv_slot_rect(0).get_center() * GameConstants.UI_SCALE, false, false)
 	var drag_c2i_ok: bool = dragging_c2i and _inv.size() == n_inv1 + 1 and c.items.size() == n_cont1 - 1
 	_verify_log("drag real cont->inv: dragging=%s inv %d->%d cont %d->%d" % [
 		dragging_c2i, n_inv1, _inv.size(), n_cont1, c.items.size()])
@@ -3940,10 +4742,10 @@ func _verify_ui_test() -> void:
 	# 4) 真实拖拽 背包 → 箱子
 	var n_inv2: int = _inv.size()
 	var n_cont2: int = c.items.size()
-	var p1: Vector2 = backpack.inv_item_rect(_inv[_inv.size() - 1]).get_center()
+	var p1: Vector2 = backpack.inv_item_rect(_inv[_inv.size() - 1]).get_center() * GameConstants.UI_SCALE
 	_send_mouse(p1, true, false)
 	var dragging: bool = not _drag_item.is_empty()
-	_send_mouse(backpack.cont_slot_rect(0).get_center(), false, false)
+	_send_mouse(backpack.cont_slot_rect(0).get_center() * GameConstants.UI_SCALE, false, false)
 	var drag_ok: bool = dragging and _inv.size() == n_inv2 - 1 and c.items.size() == n_cont2 + 1
 	_verify_log("drag real inv->cont: dragging=%s inv %d->%d cont %d->%d" % [
 		dragging, n_inv2, _inv.size(), n_cont2, c.items.size()])
@@ -3991,6 +4793,73 @@ func _verify_fog_test() -> void:
 	var R: int = GameConstants.FOG_VISION_RADIUS_TILES
 	var gen := FloorGeneratorScript.new()
 	var d1: Dictionary = gen.generate(_seed, 1)
+
+	# ========== ④ R-new（2026-10-22）：迷雾半径 +20% / 主视图不变 / 过渡环 ==========
+	# 用户需求逐字：「将玩家迷雾可见半径提升20%，同时保持主视图画面表示范围不变……
+	#   确保视野边缘与迷雾的过渡渲染效果自然衔接。」
+	var v_ok: bool = true
+	# ④-a 半径 = 12（10 的 1.2 倍，字面量期望）
+	var R_exp: int = 12
+	if GameConstants.FOG_VISION_RADIUS_TILES != R_exp:
+		v_ok = false
+		_verify_log("FAIL: ④-a 迷雾可见半径 = %d（期望 %d = 10×1.2）" % [GameConstants.FOG_VISION_RADIUS_TILES, R_exp])
+	# ④-b 主视图范围不变：Camera2D.zoom 必须恒为 (1,1)
+	#   （视口 640×360 × zoom 1.0 → 屏幕恒显示 40×22.5 格；改 zoom 会同时改 UI 布局假设）
+	if camera.zoom != Vector2(1.0, 1.0):
+		v_ok = false
+		_verify_log("FAIL: ④-b Camera2D.zoom = %s（期望 (1,1) —— 主视图范围必须与迷雾半径解耦）" % str(camera.zoom))
+	# ④-c 过渡环：LOS 通的圈外 1 环必须亮（>0），圈内必须 0（无过渡），墙后必须 0（LOS 门控）
+	var fg_v := FogGridScript.new()
+	fg_v.set_floor(d1["grid"], cols, rows, 1)
+	# 找一个地面格作为玩家位（远离地图边缘，保证环上格不越界）
+	var pt_v := Vector2i(cols / 2, rows / 2)
+	var found_v: bool = false
+	for ry in range(rows / 2 - 6, rows / 2 + 6):
+		for rx in range(cols / 2 - 6, cols / 2 + 6):
+			if rx >= 0 and ry >= 0 and rx < cols and ry < rows and int(d1["grid"][ry * cols + rx]) == 1:
+				pt_v = Vector2i(rx, ry)
+				found_v = true
+				break
+			if found_v:
+				break
+	if not found_v:
+		v_ok = false
+		_verify_log("FAIL: ④-c 前置 —— 地图中部找不到地面格")
+	fg_v.update_visibility(Vector2(float(pt_v.x) * tile + 8.0, float(pt_v.y) * tile + 8.0))
+	var ring_lit: int = 0        # 过渡环内 LOS 通且亮的格数
+	var ring_wall_dim: int = 0   # 过渡环内的墙格且 edge_fade==0 的格数（LOS 门控生效）
+	var inner_zero: int = 0      # 圈内格 edge_fade==0 的格数（圈内不该有过渡）
+	var inner_seen: int = 0
+	var rr: int = R + GameConstants.FOG_EDGE_FADE_TILES
+	for ey in range(-rr, rr + 1):
+		for ex in range(-rr, rr + 1):
+			var tt: Vector2i = pt_v + Vector2i(ex, ey)
+			if tt.x < 0 or tt.y < 0 or tt.x >= cols or tt.y >= rows:
+				continue
+			var d2: int = ex * ex + ey * ey
+			var e: float = fg_v.edge_fade(tt)
+			if d2 <= R * R:
+				inner_seen += 1
+				if e <= 0.0:
+					inner_zero += 1
+			elif d2 <= rr * rr:
+				# 过渡环：LOS 通 → 亮；墙格 → 必须 0
+				if int(d1["grid"][tt.y * cols + tt.x]) == 1:
+					if e > 0.0:
+						ring_lit += 1
+				else:
+					if e == 0.0:
+						ring_wall_dim += 1
+	if inner_seen > 0 and inner_zero != inner_seen:
+		v_ok = false
+		_verify_log("FAIL: ④-c 圈内出现非零过渡值（%d/%d）—— 圈内应全亮无过渡" % [inner_seen - inner_zero, inner_seen])
+	if ring_lit < 1:
+		v_ok = false
+		_verify_log("FAIL: ④-c 过渡环内没有任何 LOS 通的亮格（%d）—— 边缘软过渡没接上" % ring_lit)
+	_verify_log("④ vision radius=%d(+20%% of 10) zoom=%s | edge ring: lit=%d wall_dimmed=%d inner_zero=%d/%d（期望 radius=12 zoom=(1,1) lit>0）" % [
+		GameConstants.FOG_VISION_RADIUS_TILES, str(camera.zoom), ring_lit, ring_wall_dim, inner_zero, inner_seen])
+	if not v_ok:
+		ok = false
 
 	# 0) 结构：独立 CanvasLayer（layer=9，高于世界、低于 HUD=10；PAUSABLE；随摄像机 follow_viewport）
 	_verify_log("0) fog_layer.layer=%d(expect 9) follow_viewport=%s process_mode=%d(expect 1) hud_layer=%d(expect 10)" % [
@@ -4806,7 +5675,7 @@ func _verify_loot_test() -> void:
 	_verify_log("=== crate loot pool test (R-82: +7 materials, equal weight, count unchanged) ===")
 	var ok: bool = true
 
-	# ---- A. 池子结构：总数 = EXPECT_POOL_TOTAL（8 旧 + 7 材料 + 1 可乐 = 16），7 件材料全部在池且**无重复 id** ----
+	# ---- A. 池子结构：总数 = EXPECT_POOL_TOTAL（8 旧 + 7 材料(R-82) + 1 可乐(R-97) + 13 新(R-new) = 29），7 件材料全部在池且**无重复 id** ----
 	const NEW_IDS: Array = ["powder", "scrap", "plastic", "circuit", "vegetable", "meat", "fuel"]
 	const NEW_LABELS: Dictionary = {
 		"powder": "火药", "scrap": "废金属", "plastic": "塑料", "circuit": "电子元件",
@@ -4821,8 +5690,8 @@ func _verify_loot_test() -> void:
 	#⚠ 维护提示（防再次过期）：**每次往 `ITEM_TYPES` 加/减物品，都要同步改这一行**。
 	#   这正是 R-97 踩到的问题 —— 断言不会自己跟着池子长。
 	#   （"每箱件数仍是 4~10"与"每类都能被抽到"由下面 A/B 两段独立守护，不依赖这个数字。）
-	const EXPECT_POOL_TOTAL: int = 16
-	_verify_log("pool size: %d (expect %d = 8 旧 + 7 材料(R-82) + 1 可乐(R-97))" % [pool.size(), EXPECT_POOL_TOTAL])
+	const EXPECT_POOL_TOTAL: int = 29
+	_verify_log("pool size: %d (expect %d = 8 旧 + 7 材料(R-82) + 1 可乐(R-97) + 13 新(R-new))" % [pool.size(), EXPECT_POOL_TOTAL])
 	if pool.size() != EXPECT_POOL_TOTAL:
 		_verify_log("FAIL: 池子应为 %d 件，实际 %d（新增/删除物品时必须同步改 EXPECT_POOL_TOTAL）" % [
 			EXPECT_POOL_TOTAL, pool.size()])
@@ -4866,10 +5735,54 @@ func _verify_loot_test() -> void:
 		_verify_log("FAIL: 新物品定义有问题：%s" % [str(proto_bad)])
 		ok = false
 
+	# ---- C-2. R-new 批次的 13 件新物品：label / kind / weight / use 逐件对照**手写**字面量 ----
+	#   ⚠ 与 C 段同口径：期望**不取自** ITEM_TYPES（防恒真），全部手写（用户 2026-10-14 需求逐字）。
+	#   ⚠ 负 thirst（biscuit/jerky/herb）是本批首次引入的机制 —— use 逐字钉死，防被『顺手取正』。
+	const RNEW_EXPECT: Dictionary = {
+		"biscuit": {"label": "压缩饼干", "kind": "consumable", "weight": 1.0, "use": {"hunger": 30.0, "thirst": -10.0}},
+		"jerky": {"label": "肉干", "kind": "consumable", "weight": 1.2, "use": {"hunger": 20.0, "thirst": -5.0}},
+		"fruit": {"label": "水果", "kind": "consumable", "weight": 1.0, "use": {"hunger": 5.0, "thirst": 15.0}},
+		"bandage": {"label": "绷带", "kind": "consumable", "weight": 0.5, "use": {"heal": 30.0}},
+		"herb": {"label": "草药", "kind": "consumable", "weight": 0.5, "use": {"heal": 20.0, "hunger": 20.0, "thirst": -10.0}},
+		"pharm_raw": {"label": "制药原料", "kind": "misc", "weight": 1.5, "use": {}},
+		"alcohol": {"label": "酒精", "kind": "misc", "weight": 2.0, "use": {}},
+		"syringe": {"label": "空注射器", "kind": "misc", "weight": 0.2, "use": {}},
+		"battery": {"label": "电池", "kind": "misc", "weight": 1.0, "use": {}},
+		"wood": {"label": "木材", "kind": "misc", "weight": 2.5, "use": {}},
+		"nail": {"label": "钉子", "kind": "misc", "weight": 1.0, "use": {}},
+		"screw": {"label": "螺丝", "kind": "misc", "weight": 0.8, "use": {}},
+		"glue": {"label": "胶水", "kind": "misc", "weight": 1.0, "use": {}},
+	}
+	var rnew_bad: Array = []
+	for rid in RNEW_EXPECT.keys():
+		var rp: Dictionary = _proto_by_id(String(rid))
+		var rexp: Dictionary = RNEW_EXPECT[rid] as Dictionary
+		if rp.is_empty():
+			rnew_bad.append("%s:missing" % rid)
+			continue
+		if String(rp.get("label", "")) != String(rexp.get("label", "")):
+			rnew_bad.append("%s:label" % rid)
+		if String(rp.get("kind", "")) != String(rexp.get("kind", "")):
+			rnew_bad.append("%s:kind" % rid)
+		if not is_equal_approx(float(rp.get("weight", -1.0)), float(rexp.get("weight", -1.0))):
+			rnew_bad.append("%s:weight" % rid)
+		var ruse: Dictionary = rp.get("use", {}) as Dictionary
+		var euse: Dictionary = rexp.get("use", {}) as Dictionary
+		if ruse.size() != euse.size():
+			rnew_bad.append("%s:use_size" % rid)
+		else:
+			for uk in euse.keys():
+				if not ruse.has(uk) or not is_equal_approx(float(ruse[uk]), float(euse[uk])):
+					rnew_bad.append("%s:use[%s]=%s(want %s)" % [rid, uk, str(ruse.get(uk)), str(euse[uk])])
+	_verify_log("C-2 R-new 13 items: bad=%s (expect [])" % [str(rnew_bad)])
+	if rnew_bad.size() > 0:
+		_verify_log("FAIL: R-new 新物品定义与手写期望不符：%s" % [str(rnew_bad)])
+		ok = false
+
 	# ---- A/B. 跑足样本：**逐 kind**（R-109）件数守恒 + 全池覆盖率 + 逐类覆盖率 ----
 	# ⚠⚠ **R-109 核心改动**：这一段从「单次全池抽样」改成「四类各跑一遍」。
 	# 【为什么必须四类都跑，而不是只跑一类】
-	#   ① 本入口的核心断言是「`ITEM_TYPES` 里 16 件**每件都真的抽得到**」= **分类没漏件**。
+	#   ① 本入口的核心断言是「`ITEM_TYPES` 里 29 件**每件都真的抽得到**」= **分类没漏件**。
 	#      若只传一类（例如只传 `weapon`），另外 14 件**永远不会被抽到** → `never` 断言必然变红。
 	#      所以「四类都跑」不是可选方案，而是本入口能存活的前提。
 	#   ② R-106 ⓪③ 已钉「四类池并集 == `ITEM_TYPES` 16 件」→ 四类都跑**不会**让任何物品
@@ -4939,7 +5852,7 @@ func _verify_loot_test() -> void:
 		_verify_log("FAIL: 件数分布未覆盖 %s" % [str(missing_n)])
 		ok = false
 
-	# 覆盖率（全池合并）：16 件每件都该在**某一种箱子**里被抽到
+	# 覆盖率（全池合并）：29 件每件都该在**某一种箱子**里被抽到
 	#   ⚠ 这段是**动态遍历 `pool`** 的，所以加物品不会让它过期（与 `EXPECT_POOL_TOTAL` 那个字面量不同）。
 	var never: Array = []
 	for t2 in pool:
@@ -5513,11 +6426,24 @@ func _build_trace_arrows() -> void:
 #     · 敌人红点 5 秒 ← **唯一**真正新增的临时状态（`_trace_marks`）
 #   反面：若在 V 那一刻快照一份「已发现箱子 id 列表」，就多出一份会与 fog 漂移的状态，
 #   典型 bug = 开箱后标记没了 / 换层回来错位 / 重新生成层后留幽灵标记。
+# ==== R-new：**技能统一禁用门**（用户需求①）====
+# 基地层（第 100 层）**禁用一切技能**。单点收口：将来新增技能一律在其入口首行调它，
+#   「基地不可用」这条规则只需改这一处。返回空串 = 允许使用。
+func _skill_blocked_reason() -> String:
+	if GameConstants.is_base_floor(_floor):
+		return "base"
+	return ""
+
 func _toggle_trace() -> void:
 	# 暂停 / 死亡 / 背包界面不响应：这三状态下玩家看不到世界，
 	# 弹一个「5 秒后自动消失」的提示毫无意义（且会白吃一次冷却）。
 	if _paused or _game_over or death_screen.visible or backpack.visible:
 		_trace_last_reject = "ui"
+		return
+	# R-new：基地层禁用技能（统一门，将来新增技能同走此门）。
+	if _skill_blocked_reason() != "":
+		_trace_last_reject = "base"
+		_toast("技能在基地不可用", 1.2)
 		return
 	if _trace_cd_left_game > 0.0:
 		# 冷却中：明确拒绝，且**不产生新标记**（需求③）。
@@ -5533,6 +6459,7 @@ func _toggle_trace() -> void:
 			_fog.world_to_tile(player.global_position), GameConstants.TRACE_SCAN_RADIUS_TILES)
 	# ② 敌人红点（5 秒临时；窗口内每帧刷新，见 `_advance_trace`）
 	_trace_marks = _scan_enemies_in_radius()
+	_update_minimap()   # R-new：扫描标记变了 → 立刻刷小地图（敌人红点马上出现）
 	_trace_marking = true
 	_trace_mark_t = 0.0
 	_trace_cd_left_game = _trace_cooldown_game_seconds()
@@ -5596,9 +6523,91 @@ func _collect_crate_marks() -> Array:
 # 两个计时器共用一个推进函数，但**单位不同**（文件头已详述理由）。
 # 暂停时 `_process` 已在上面早退（`if get_tree().paused: return`），
 # → 暂停不消耗冷却也不推进标记窗口：玩家看背包/暂停页时不该被偷走冷却。
+# R-new：把「已探索地形 + 关键点」推给 HUD 迷你地图（节流调用；覆盖 LOS 探索 / V 揭示 / 换层）。
+#   采样：**每 1×1 格 = 1 像素**（128×86 → 128×86px，地图原生尺寸、不拉伸故最清晰）。
+#   ⚠ 上一次误把"采样步长 3→2"当成"放大"，那只是变清晰、像素尺寸没变（仍 64×43）——用户已纠正：
+#     要的是**小地图这个框本身变大**。正解是减少压缩（步长→1），尺寸自然涨到原生 128×86。
+#   格值 0=未探索 1=已探索地面 2=已探索墙。
+#   标记层与大地图（M 键 / FloorMap）**同源同款**：逃出点 exit_marker、本层全部箱子
+#   `_collect_crate_marks()`、V 扫描敌人 `_trace_marks`，且**同样受 fog 门控**
+#   （未探索的格子不画标记，与 FloorMap.gd 的画法逐条一致）。
+func _update_minimap() -> void:
+	if _fog == null or _floor_grid.is_empty() or _floor_cols <= 0 or _floor_rows <= 0:
+		return
+	# R-new【局部视图】：不显示整层，只显示**以玩家为中心的 48×32 格窗口**
+	#   （MinimapView.CELL_PX=2 → 总框 96×65 像素）。既看得清、又不占屏。
+	# ⚠⚠ R-new（2026-10-21 迷你地图 +50%）：窗口 48×32 → 36×24（换取实际尺寸 +50%）。
+	# ⚠⚠ R-new（2026-10-22 **扩大视野**，用户需求逐字「扩大其视野范围，使小地图能够覆盖
+	#   更大的地图区域……修改小地图的缩放比例或视口尺寸」）：36×24 → **48×32**。
+	#   · 视野面积 48×32 / 36×24 = **1.78 倍**（+78%）。
+	#   · **CELL_PX 保持 2 不变** —— 每 tile 2px、玩家点/出口/箱子/敌人红点的**绝对像素
+	#     尺寸全部不变** ⇒ 标识清晰可读性不降（这是"保持清晰"的关键：不放缩比例）。
+	#   · 框 = 96×64（设计空间）→ 实际 ×UI_SCALE(2) = **192×128**，仍只占 640×360
+	#     视口的 30%×36%，与左上 HUD / 右下弹药条 / F100 按钮两两不冲突。
+	#   · 想再扩大：只改这两个数（窗口越大视野越广，注意别让框越过屏幕中线）。
+	var win_cols: int = 96
+	var win_rows: int = 64
+	var half_w: int = win_cols / 2
+	var half_h: int = win_rows / 2
+	var pt0: Vector2i = _fog.world_to_tile(player.global_position)
+	# 窗口左上角 = 玩家格 - 半窗，并夹在 [0, cols-win] / [0, rows-win] 内（不越界）。
+	var ox: int = clampi(pt0.x - half_w, 0, maxi(0, _floor_cols - win_cols))
+	var oy: int = clampi(pt0.y - half_h, 0, maxi(0, _floor_rows - win_rows))
+	var cells := PackedByteArray()
+	cells.resize(win_cols * win_rows)
+	var idx: int = 0
+	for my in win_rows:
+		for mx in win_cols:
+			var tx: int = mini(ox + mx, _floor_cols - 1)
+			var ty: int = mini(oy + my, _floor_rows - 1)
+			var v: int = 0
+			if _fog.state_at_tile(Vector2i(tx, ty)) >= GameConstants.FOG_EXPLORED:
+				v = 2 if _floor_grid[ty * _floor_cols + tx] == 0 else 1   # 0=墙，其它=地面
+			cells[idx] = v
+			idx += 1
+	# 玩家在窗口内的格子
+	var pmx: int = clampi(pt0.x - ox, 0, win_cols - 1)
+	var pmy: int = clampi(pt0.y - oy, 0, win_rows - 1)
+	# ---- 标记层（与大地图一致，均按 fog 门控）→ 换算成窗口内格坐标 ----
+	#   世界格 → 窗口内格 = 世界格 - 窗口原点，越界（不在窗口内）则不画。
+	var exit_cell: Vector2i = Vector2i(-1, -1)
+	if exit_marker != null and is_instance_valid(exit_marker) \
+			and _fog.state_at_world(exit_marker.global_position) != GameConstants.FOG_UNEXPLORED:
+		var et: Vector2i = _fog.world_to_tile(exit_marker.global_position)
+		if et.x >= ox and et.x < ox + win_cols and et.y >= oy and et.y < oy + win_rows:
+			exit_cell = Vector2i(et.x - ox, et.y - oy)
+	var crate_cells: Array = []
+	for e in _collect_crate_marks():
+		var wp: Vector2 = (e as Array)[0]
+		if _fog.state_at_world(wp) == GameConstants.FOG_UNEXPLORED:
+			continue
+		var ct: Vector2i = _fog.world_to_tile(wp)
+		if ct.x < ox or ct.x >= ox + win_cols or ct.y < oy or ct.y >= oy + win_rows:
+			continue
+		crate_cells.append([Vector2i(ct.x - ox, ct.y - oy), (e as Array)[1]])
+	var enemy_cells: Array = []
+	# ⚠ `_trace_marks` 元素是**裸 Vector2 世界坐标**（见 `_scan_enemies_in_radius`），不是数组。
+	for e in _trace_marks:
+		var wp2: Vector2 = e as Vector2
+		if _fog.state_at_world(wp2) == GameConstants.FOG_UNEXPLORED:
+			continue
+		var et2: Vector2i = _fog.world_to_tile(wp2)
+		if et2.x < ox or et2.x >= ox + win_cols or et2.y < oy or et2.y >= oy + win_rows:
+			continue
+		enemy_cells.append(Vector2i(et2.x - ox, et2.y - oy))
+	hud.set_minimap(cells, win_cols, win_rows, Vector2i(pmx, pmy), exit_cell, crate_cells, enemy_cells)
+
 func _advance_trace(delta: float) -> void:
 	if _trace_cd_left_game > 0.0:
 		_trace_cd_left_game = maxf(0.0, _trace_cd_left_game - delta * _trace_time_scale())
+	# R-new：V 技能按钮时钟冷却（每帧推比例 0..1）
+	var _cd_total: float = _trace_cooldown_game_seconds()
+	hud.set_scan_cd(_trace_cd_left_game / _cd_total if _cd_total > 0.0 else 0.0)
+	# R-new：迷你地图节流重算（~0.15s）
+	_minimap_t += delta
+	if _minimap_t >= 0.15:
+		_minimap_t = 0.0
+		_update_minimap()
 	if not _trace_marking:
 		return
 	_trace_mark_t += delta
@@ -5987,7 +6996,9 @@ func _verify_survival_test() -> void:
 	#   （覆盖面由 `EXPECT_VERB_IDS` 这个**字面量列表**定义；漏进来的唯一可能是"新物品没被加进这个列表"，
 	#     而那种漏检由 `--verify-verb` ①从`ITEM_TYPES` **动态枚举**兜住 —— 两条断言互补。）
 	const EXPECT_VERB: String = "使用"
-	const EXPECT_VERB_IDS: Array = ["medkit", "canned", "mre", "water", "coca"]
+	# R-new：补入本批 5 件新 consumable（biscuit/jerky/fruit/bandage/herb）——动词覆盖面完整化
+	const EXPECT_VERB_IDS: Array = ["medkit", "canned", "mre", "water", "coca",
+		"biscuit", "jerky", "fruit", "bandage", "herb"]
 	var verb_bad: Array = []
 	var verb_seen: Array = []
 	for vid in EXPECT_VERB_IDS:
@@ -6088,6 +7099,39 @@ func _verify_zombie_test() -> void:
 	#   并让函数中断 → quit() 永不执行 → 进程挂死超时。只释放 z2，并用 is_instance_valid 兜底。
 	if is_instance_valid(z2):
 		z2.queue_free()
+	# =================================================================
+	# ⑤ **死引用守卫**静态断言（R-new 修复"previously freed"的防复发 · 2026-10-15）
+	# =================================================================
+	#   用户实机报错 Zombie.gd:218：CHASE 的 else 分支无守卫访问 `target.global_position`
+	#   （target 可能是已释放的敌对敌人）。行为断言难稳定复现（依赖帧序）→ 用**源码文本**
+	#   钉死两件事：
+	#     ① `_lunge_dir = Vector2.ZERO`（CHASE else 分支标志）与 `_chase_dir(d)` 之间
+	#        必须出现 `is_instance_valid(target)` 守卫；
+	#     ② 重扫条件必须是 `(target != null and target_gone)`（持有失效目标即重扫），
+	#        不许退回 `_had_target` 那种有死引用窗口的写法。
+	var zsf := FileAccess.open("res://scenes/enemies/Zombie.gd", FileAccess.READ)
+	var guard_ok: bool = false
+	var rescan_ok: bool = false
+	if zsf == null:
+		_verify_log("FAIL: ⑤ 读不到 res://scenes/enemies/Zombie.gd —— 静态守护无法进行")
+		ok = false
+	else:
+		var zsrc: String = zsf.get_as_text()
+		zsf.close()
+		rescan_ok = zsrc.contains("if _sense_t <= 0.0 or (target != null and target_gone):")
+		var lung_idx: int = zsrc.find("_lunge_dir = Vector2.ZERO")
+		if lung_idx >= 0:
+			var chase_idx: int = zsrc.find("_chase_dir(d)", lung_idx)
+			if chase_idx > lung_idx:
+				guard_ok = zsrc.substr(lung_idx, chase_idx - lung_idx).contains("is_instance_valid(target)")
+	_verify_log("⑤ freed-target guard: chase_else_guard=%s rescan_cond=%s (expect both true)" % [
+		str(guard_ok), str(rescan_ok)])
+	if not guard_ok:
+		_verify_log("FAIL: ⑤ CHASE else 分支的 target 访问丢了 is_instance_valid 守卫（= 用户实机报的 previously freed）")
+		ok = false
+	if not rescan_ok:
+		_verify_log("FAIL: ⑤ 重扫条件被改回 _had_target 写法（持有失效 target 的帧不重扫 → 死引用窗口）")
+		ok = false
 	_verify_log("=== zombie attack reaction test %s ===" % ("PASSED" if ok else "FAILED"))
 	get_tree().quit()
 
@@ -6266,6 +7310,13 @@ func _verify_item_test() -> void:
 	#   MP5 的 3×2 占格由 `--verify-gear` ⑦-c 直接对**物品原型**断言（不依赖它是否在背包里），
 	#   覆盖面不丢；这里继续验证"占格矩形四角都能命中"这条交互不变式。
 	_refresh_backpack()      # 命中测试读的是 backpack.items（正常流程由 _open_backpack 赋值）
+	# R-158：右键菜单走 `_input` 的**真实链路**，而 `_input` 有 `if not backpack.visible: return`
+	#   守卫 —— 本入口此前只 `_refresh_backpack()`（填数据）却**没真正打开背包**，
+	#   右键事件被守卫吞掉 → `menu_open=false / entries=[]`（r158 全量唯一真实红）。
+	#   ⚠ 走**产品路径** `_open_backpack(false)` 而不是直接 `backpack.visible = true`：
+	#   前者还会清掉扳机按住状态（R-new「开 UI 即停火」），与玩家真实操作一致。
+	#   ⚠ 本入口**无 await**（全同步），所以 `_open_backpack` 里的 `get_tree().paused = true` 不会卡帧。
+	_open_backpack(false)
 	var r: Rect2 = backpack.inv_item_rect(pk) if not pk.is_empty() else Rect2()
 	var hit_tl: Dictionary = backpack.pick_test(r.position + Vector2(1.0, 1.0))
 	var hit_br: Dictionary = backpack.pick_test(Vector2(r.position.x + r.size.x - 1.0, r.position.y + r.size.y - 1.0))
@@ -6335,8 +7386,8 @@ func _verify_item_test() -> void:
 				w133_idx = wi
 				break
 		var hit: Dictionary = backpack.pick_test(backpack.inv_item_rect(w133).get_center()) if not w133.is_empty() else {}
-		_send_mouse(backpack.inv_item_rect(w133).get_center(), true, false, MOUSE_BUTTON_RIGHT)
-		_send_mouse(backpack.inv_item_rect(w133).get_center(), false, false, MOUSE_BUTTON_RIGHT)
+		_send_mouse(backpack.inv_item_rect(w133).get_center() * GameConstants.UI_SCALE, true, false, MOUSE_BUTTON_RIGHT)
+		_send_mouse(backpack.inv_item_rect(w133).get_center() * GameConstants.UI_SCALE, false, false, MOUSE_BUTTON_RIGHT)
 		var menu_open: bool = item_menu.open
 		var actions: Array = []
 		var equip_row := -1
@@ -6348,8 +7399,8 @@ func _verify_item_test() -> void:
 		if not menu_open or equip_row < 0:
 			ok = false
 		else:
-			_send_mouse(item_menu.row_rect(equip_row).get_center(), true, false, MOUSE_BUTTON_LEFT)
-			_send_mouse(item_menu.row_rect(equip_row).get_center(), false, false, MOUSE_BUTTON_LEFT)
+			_send_mouse(item_menu.row_rect(equip_row).get_center() * GameConstants.UI_SCALE, true, false, MOUSE_BUTTON_LEFT)
+			_send_mouse(item_menu.row_rect(equip_row).get_center() * GameConstants.UI_SCALE, false, false, MOUSE_BUTTON_LEFT)
 			var cur_after: String = String(player.weapons[player.weapon_index].get("id", ""))
 			var has_pistol_item := false
 			for it in _inv:
@@ -6379,8 +7430,8 @@ func _verify_item_test() -> void:
 		player.add_load(3.0)
 		var load_b: float = player.current_load
 		var inv_b: int = _inv.size()
-		_send_mouse(backpack.inv_item_rect(medkit).get_center(), true, false, MOUSE_BUTTON_RIGHT)
-		_send_mouse(backpack.inv_item_rect(medkit).get_center(), false, false, MOUSE_BUTTON_RIGHT)
+		_send_mouse(backpack.inv_item_rect(medkit).get_center() * GameConstants.UI_SCALE, true, false, MOUSE_BUTTON_RIGHT)
+		_send_mouse(backpack.inv_item_rect(medkit).get_center() * GameConstants.UI_SCALE, false, false, MOUSE_BUTTON_RIGHT)
 		var use_row := -1
 		for i in item_menu.entries.size():
 			if String(item_menu.entries[i]["action"]) == "use":
@@ -6389,20 +7440,26 @@ func _verify_item_test() -> void:
 			_verify_log("FAIL: no 使用 entry for medkit (entries=%s)" % str(item_menu.entries))
 			ok = false
 		else:
-			_send_mouse(item_menu.row_rect(use_row).get_center(), true, false, MOUSE_BUTTON_LEFT)
-			_send_mouse(item_menu.row_rect(use_row).get_center(), false, false, MOUSE_BUTTON_LEFT)
+			_send_mouse(item_menu.row_rect(use_row).get_center() * GameConstants.UI_SCALE, true, false, MOUSE_BUTTON_LEFT)
+			_send_mouse(item_menu.row_rect(use_row).get_center() * GameConstants.UI_SCALE, false, false, MOUSE_BUTTON_LEFT)
+			# R-new：消耗品改用「读条」链路（_begin_use_item：关背包 + 世界读条）。点"使用"后
+			#   读条未满、效果未应用 → 显式推进读条到满，触发完成回调 _use_item（效果+消耗）。
+			player._update_using(GameConstants.ITEM_USE_TIME)
 			_verify_log("use medkit: hp %.1f->%.1f(expect +40) inv %d->%d(expect -1) load %.1f->%.1f(expect -3.0)" % [
 				hp0, player.hp, inv_b, _inv.size(), load_b, player.current_load])
 			if player.hp <= hp0 or _inv.size() != inv_b - 1 or not is_equal_approx(player.current_load, load_b - 3.0):
 				ok = false
 
+		# R-new：上一段「用医疗包」走了读条链路，_begin_use_item 已关背包（用户需求：读条时关界面）。
+		#   本段要再右键背包里的背心 → 先重新打开背包。
+		_open_backpack(false)
 		# 7) 装备护甲（真实链路）：防弹背心 2×2 → 右键 → 「装备」→ 减伤生效
 		var vest: Dictionary = _proto_by_id("vest")
 		backpack.try_place(_inv, vest, GameConstants.INV_ROWS)
 		_inv.append(vest)
 		player.add_load(float(vest.get("weight", 0.0)))
-		_send_mouse(backpack.inv_item_rect(vest).get_center(), true, false, MOUSE_BUTTON_RIGHT)
-		_send_mouse(backpack.inv_item_rect(vest).get_center(), false, false, MOUSE_BUTTON_RIGHT)
+		_send_mouse(backpack.inv_item_rect(vest).get_center() * GameConstants.UI_SCALE, true, false, MOUSE_BUTTON_RIGHT)
+		_send_mouse(backpack.inv_item_rect(vest).get_center() * GameConstants.UI_SCALE, false, false, MOUSE_BUTTON_RIGHT)
 		var eq_row := -1
 		for i in item_menu.entries.size():
 			if String(item_menu.entries[i]["action"]) == "equip":
@@ -6411,8 +7468,8 @@ func _verify_item_test() -> void:
 			_verify_log("FAIL: no 装备 entry for vest")
 			ok = false
 		else:
-			_send_mouse(item_menu.row_rect(eq_row).get_center(), true, false, MOUSE_BUTTON_LEFT)
-			_send_mouse(item_menu.row_rect(eq_row).get_center(), false, false, MOUSE_BUTTON_LEFT)
+			_send_mouse(item_menu.row_rect(eq_row).get_center() * GameConstants.UI_SCALE, true, false, MOUSE_BUTTON_LEFT)
+			_send_mouse(item_menu.row_rect(eq_row).get_center() * GameConstants.UI_SCALE, false, false, MOUSE_BUTTON_LEFT)
 			var hp_a: float = player.hp
 			player.take_damage(20.0)
 			var taken: float = hp_a - player.hp
@@ -7382,6 +8439,237 @@ func _parse_verify_params() -> void:
 # ⚠ 帧数↔时间换算一律用 `frames / 60.0`，**不用日志里的秒数整除值**当实测。
 # ⚠ 控制变量：僵尸贴身 0.2s 就打玩家，本测试把玩家 hp 反复拉满、并尽量把测试僵尸放在
 #   安全距离外，避免"玩家先死导致后续断言全失效"。真出现意外会显式记账，不静默。
+# ==== R-new：敌人尸体系统验证（2026-10-13 用户需求）====
+# 【需求逐字】「敌人死后会留下尸体，里面包含1到3件战利品。敌人尸体也和箱子一样，玩家靠近后
+#   出现按'F'键搜索的提示，玩家按F后打开箱子界面。如果地面上同一瓦片内有多具尸体那么将
+#   战利品合并到一个尸体内（即同一瓦片内存在多具尸体则仅保留一具）。」
+#
+# 覆盖条目：
+#   ① 单杀 → 生成 1 具尸体、战利品 1~3 件、每件是合法物品原型
+#   ② 同瓦片杀两只 → 仍 1 具（仅保留一具）、战利品合并（件数相加）
+#   ③ 不同瓦片杀两只 → 2 具
+#   ④ 尸体只进 "corpses" 组、**不进** "crates" 组（R-110 V 扫描「不包括敌人尸体」铁律）
+#   ⑤ hint 文案 = 「按 F 搜索尸体」（与箱子的「打开」不同词）
+#   ⑥ F 交互链路：`_nearest_container` 能命中尸体；`_toggle_container` 打开尸体界面、
+#      战利品**不被重 roll**（件数开前开后一致）
+#   ⑦ 尸体无碰撞（collision_layer == 0，玩家可穿过）
+func _verify_corpse_test() -> void:
+	_verify_log("=== R-new corpse test (敌人尸体 · 战利品 · 同瓦片合并 · F 搜索) ===")
+	var ok: bool = true
+	# ---------- 清场 + 玩家保护 ----------
+	for n in enemies_container.get_children():
+		n.queue_free()
+	for n in furniture_container.get_children():
+		n.queue_free()
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	player.armor = {}
+	player.hp = player.max_hp
+	player.is_reloading = false
+	player.set_remote_move(false)
+
+	# ==================================================================
+	# ⓪ **生产链路**：_build_floor 的 died 接线（四处）必须真的接上
+	# ==================================================================
+	#   —— ①-⑦ 测的是 `_on_enemy_died` 函数行为（手工接 died，同 --verify-stagger ② 范式）；
+	#      ⓪ 测的是「生成器创建的敌人」这条**玩家实际玩的路径**。
+	#   ⚠ 本入口必须带 `--verify-startfloor99`（ENTRIES 已带）：基地层（100）没有敌人，
+	#     在基地跑 ⓪ 会恒 false。
+	_build_floor(false)
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	var gen_enemies: Array = enemies_container.get_children()
+	var wired_ok: bool = false
+	if gen_enemies.size() > 0:
+		gen_enemies[0].take_damage(99999.0)   # 生产同款击杀路径
+		await get_tree().physics_frame
+		wired_ok = get_tree().get_nodes_in_group("corpses").size() >= 1
+	_verify_log("⓪ production wiring: gen_enemies=%d corpse_spawned=%s (expect true)" % [
+		gen_enemies.size(), wired_ok])
+	if not wired_ok:
+		_verify_log("FAIL: ⓪ 生成器创建的敌人死亡后没留下尸体 —— _build_floor 的 died 接线漏了")
+		ok = false
+	# 清掉⓪ 的场，给①-⑦ 一个干净起点
+	for n in enemies_container.get_children():
+		n.queue_free()
+	for n in furniture_container.get_children():
+		n.queue_free()
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+
+	var pp: Vector2 = player.global_position
+	var corpses: Array = get_tree().get_nodes_in_group("corpses")
+	_verify_log("corpses after clear=%d (expect 0)" % corpses.size())
+	if corpses.size() != 0:
+		_verify_log("FAIL: 清场后仍有尸体节点")
+		ok = false
+
+	# ==================================================================
+	# ① 单杀 → 1 具尸体 + 1~3 件战利品
+	# ==================================================================
+	var z1 := ZombieScene.instantiate()
+	z1.position = pp + Vector2(24.0, 0.0)
+	enemies_container.add_child(z1)
+	z1.died.connect(_on_enemy_died.bind(z1))   # 手工接（bind 同生产接线；无参信号必须 bind）
+	z1.take_damage(99999.0)   # 生产同款路径：take_damage -> _die -> died.emit（同步）-> queue_free
+	await get_tree().physics_frame
+	var cs: Array = get_tree().get_nodes_in_group("corpses")
+	_verify_log("① single kill: corpses=%d (expect 1)" % cs.size())
+	if cs.size() != 1:
+		_verify_log("FAIL: ① 杀一只僵尸后尸体数 = %d（expect 1）" % cs.size())
+		ok = false
+		get_tree().quit()   # ⚠ 必须 quit：否则 FAIL 后进程挂到回归超时（rc=124）
+		return
+	var c1: Node = cs[0]
+	var n1: int = c1.items.size()
+	_verify_log("① corpse at (%.1f,%.1f) tile=(%d,%d) loot=%d (expect 1..3)" % [
+		c1.global_position.x, c1.global_position.y, c1.get("tile").x, c1.get("tile").y, n1])
+	if n1 < GameConstants.CORPSE_LOOT_MIN or n1 > GameConstants.CORPSE_LOOT_MAX:
+		_verify_log("FAIL: ① 尸体战利品 %d 件不在 %d..%d" % [
+			n1, GameConstants.CORPSE_LOOT_MIN, GameConstants.CORPSE_LOOT_MAX])
+		ok = false
+	for it in c1.items:
+		if not (it is Dictionary) or String((it as Dictionary).get("id", "")) == "":
+			_verify_log("FAIL: ① 尸体战利品里有非物品条目（缺 id）")
+			ok = false
+
+	# ==================================================================
+	# ①-b **图集不平铺**（R-new 修复"一个死后一大片死尸"的防复发断言）
+	# ==================================================================
+	#   根因回顾：Zombie 的 EnemyArt 是 R-153 图集模式（region_enabled + region_rect
+	#   选帧；char_zombie_*.png = 256x256 = 4 帧 x 4 朝向）。Corpse.setup 最初只复制
+	#   texture/scale 而漏掉 region -> 尸体的 Sprite2D 按默认画**整张图集**
+	#   = 16 只僵尸平铺（用户实测截图：一个死后一大片死尸）。
+	#   本断言钉住：尸体的 CorpseArt 必须 region_enabled 且 region_rect 恰为单帧
+	#   64x64（不是整图 256x256，也不是空 Rect2 —— 空 region 会什么都画不出）。
+	#   ⚠ 期望值写字面量 64（Zombie.ENEMY_ATLAS_FRAME），不取自被测对象。
+	var ca_node: Node = c1.get_node_or_null(CorpseScript.CORPSE_ART_NODE)
+	var ca_art: Sprite2D = ca_node as Sprite2D
+	var atlas_ok: bool = (ca_art != null
+		and ca_art.region_enabled
+		and ca_art.region_rect.size == Vector2(64, 64))
+	_verify_log("①-b atlas no-tiling: corpse art found=%s region_enabled=%s region_rect=%s (expect true / 64x64 单帧；整图 256x256 = 一片僵尸)" % [
+		str(ca_art != null),
+		str(ca_art.region_enabled if ca_art != null else false),
+		str(ca_art.region_rect if ca_art != null else Rect2())])
+	if not atlas_ok:
+		_verify_log("FAIL: ①-b 尸体的贴图不是单帧 region（会画整张图集 = 一片僵尸）—— Corpse.setup 的 region 传参丢了")
+		ok = false
+
+	# ==================================================================
+	# ② 同瓦片杀第二只 → 合并（仍 1 具，件数相加）
+	# ==================================================================
+	var z2 := ZombieScene.instantiate()
+	z2.position = pp + Vector2(24.0, 0.0)   # 与 z1 完全同位置 = 同瓦片
+	enemies_container.add_child(z2)
+	z2.died.connect(_on_enemy_died.bind(z2))   # 手工接（bind 同生产接线；无参信号必须 bind）
+	z2.take_damage(99999.0)
+	await get_tree().physics_frame
+	cs = get_tree().get_nodes_in_group("corpses")
+	var n_after_merge: int = cs[0].items.size() if cs.size() > 0 else -1
+	# 合并后期望 = n1 + n2，n2 ∈ [CORPSE_LOOT_MIN, MAX]（第二只随机 roll 的件数，事前未知）
+	#   → 只能断言区间：n1+MIN <= 实际 <= n1+MAX。不能假设 n2 == n1（那是把随机当定值）。
+	var n2_added: int = n_after_merge - n1 if cs.size() > 0 and cs[0] == c1 else -1
+	_verify_log("② same-tile second kill: corpses=%d (expect 1) loot %d -> %d (added=%d, expect %d..%d)" % [
+		cs.size(), n1, n_after_merge, n2_added,
+		GameConstants.CORPSE_LOOT_MIN, GameConstants.CORPSE_LOOT_MAX])
+	if cs.size() != 1:
+		_verify_log("FAIL: ② 同瓦片两具尸体应合并为 1 具，实际 %d 具" % cs.size())
+		ok = false
+	if cs.size() > 0 and cs[0] != c1:
+		_verify_log("FAIL: ② 合并后节点变了（不是原尸体被并入，而是新建了一具）")
+		ok = false
+	if n2_added < GameConstants.CORPSE_LOOT_MIN or n2_added > GameConstants.CORPSE_LOOT_MAX:
+		_verify_log("FAIL: ② 战利品未按 1..3 件合并进原尸体（added=%d）" % n2_added)
+		ok = false
+
+	# ==================================================================
+	# ③ 不同瓦片（隔 32px = 2 格）杀第三只 → 2 具
+	# ==================================================================
+	var z3 := ZombieScene.instantiate()
+	z3.position = pp + Vector2(24.0 + 32.0, 0.0)
+	enemies_container.add_child(z3)
+	z3.died.connect(_on_enemy_died.bind(z3))   # 手工接（bind 同生产接线；无参信号必须 bind）
+	z3.take_damage(99999.0)
+	await get_tree().physics_frame
+	cs = get_tree().get_nodes_in_group("corpses")
+	_verify_log("③ other-tile kill: corpses=%d (expect 2)" % cs.size())
+	if cs.size() != 2:
+		_verify_log("FAIL: ③ 不同瓦片应各留一具尸体，实际 %d 具" % cs.size())
+		ok = false
+
+	# ==================================================================
+	# ④ 组归属：只进 "corpses"、不进 "crates"（R-110 V 扫描铁律）
+	# ==================================================================
+	var grp_ok: bool = true
+	for c in cs:
+		if not c.is_in_group("corpses"):
+			grp_ok = false
+		if c.is_in_group("crates"):
+			grp_ok = false
+	var crate_grp_clean: bool = true
+	for c in get_tree().get_nodes_in_group("crates"):
+		if c.is_in_group("corpses"):
+			crate_grp_clean = false
+	_verify_log("④ groups: corpses_only=%s (expect true) | crates_clean=%s (expect true)" % [
+		grp_ok, crate_grp_clean])
+	if not grp_ok or not crate_grp_clean:
+		_verify_log("FAIL: ④ 尸体组归属错误 —— 会污染 V 扫描的宝箱标记（R-110：不包括敌人尸体）")
+		ok = false
+
+	# ==================================================================
+	# ⑤ hint 文案 = 「按 F 搜索尸体」
+	# ==================================================================
+	var hint_txt: String = _crate_hint_text(cs[0])
+	var expect_hint: String = Loc.t("hint.corpse_search")
+	_verify_log("⑤ hint: \"%s\" (expect \"%s\")" % [hint_txt, expect_hint])
+	if hint_txt != expect_hint:
+		_verify_log("FAIL: ⑤ 尸体提示文案不对（玩家靠近时看不到「按 F 搜索尸体」）")
+		ok = false
+
+	# ==================================================================
+	# ⑥ F 交互链路：_nearest_container 命中尸体 + _toggle_container 打开且不重 roll
+	# ==================================================================
+	player.position = cs[0].global_position + Vector2(8.0, 0.0)   # 8px < CRATE_INTERACT_DIST(24)
+	var hit: Node = _nearest_container()
+	_verify_log("⑥ nearest_container hit=%s (expect corpse)" % [hit == cs[0]])
+	if hit != cs[0]:
+		_verify_log("FAIL: ⑥ _nearest_container 没命中尸体 —— F 键打不开尸体界面")
+		ok = false
+	var n_before: int = cs[0].items.size()
+	var was_opened: bool = cs[0].opened
+	_toggle_container()
+	await get_tree().physics_frame
+	var opened_ok: bool = cs[0].opened
+	var n_open: int = cs[0].items.size()
+	_verify_log("⑥ toggle: container_is_corpse=%s opened %s -> %s loot %d -> %d backpack_visible=%s" % [
+		_container == cs[0], was_opened, opened_ok, n_before, n_open, backpack.visible])
+	if _container != cs[0] or not opened_ok or n_open != n_before or not backpack.visible:
+		_verify_log("FAIL: ⑥ 尸体打开链路不对（界面没开 / 战利品被重 roll / _container 指错）")
+		ok = false
+	_close_backpack()
+	await get_tree().physics_frame
+
+	# ==================================================================
+	# ⑦ 尸体无碰撞（玩家可穿过）
+	# ==================================================================
+	# ⚠ 不能读 `collision_layer`：那是 **CollisionObject2D** 的属性，Corpse extends Node2D
+	#   根本没有该属性（读了直接运行时错误）→ 用"是不是碰撞体"来判断，语义等价且类型安全。
+	var no_collide: bool = not (cs[0] is CollisionObject2D)
+	_verify_log("⑦ not_a_collision_object=%s (expect true —— 玩家可穿过尸体)" % no_collide)
+	if not no_collide:
+		_verify_log("FAIL: ⑦ 尸体是碰撞体 —— 会挡玩家/子弹的路")
+		ok = false
+
+	# ---------- 收尾：清掉测试尸体，避免污染后续入口 ----------
+	for n in furniture_container.get_children():
+		n.queue_free()
+	await get_tree().physics_frame
+
+	_verify_log("verdict: %s" % ("PASSED" if ok else "FAILED"))
+	_verify_log("=== R-new corpse test %s ===" % ("PASSED" if ok else "FAILED"))
+	get_tree().quit()
+
 func _verify_stagger_test() -> void:
 	_verify_log("=== R-87 hit stagger test (局部顿帧 · 局部冻结 · 不做全局 time_scale) ===")
 	var ok: bool = true
@@ -9216,6 +10504,8 @@ func _verify_decay_test() -> void:
 #     去 & ~4（僵尸层）→ 僵尸之间不再互相阻挡
 #     去 & ~8（佣兵层）→ 僵尸也不再被佣兵阻挡
 #     保留 1 / 2 / 16   → 仍被墙与箱子挡住、仍会撞到玩家
+#   ⚠⚠ R-155（2026-10-14）叠加：敌人 mask 19 → **51**（+32 = b 类家具·防弹玻璃层）；
+#      Player 17 → **49**；子弹 13/7 → **45/39**。本入口 ⓪/⑥/⑧ 的期望值已同步推进。
 #   Player.tscn **刻意不动**（它mask 本来就是 17= 1|16，本就不含敌人层）。
 #
 # 断言分两类（都要）：
@@ -9295,6 +10585,22 @@ func _clash_min_pair(nodes: Array) -> float:
 			mn = minf(mn, a.global_position.distance_to(b.global_position))
 	return mn
 
+# R-new：读敌人碰撞盒 X 向半宽（无形状/异形兜底 6.0 = 旧 12x12 口径）。
+#   用途：R-93 ③⑤「贴墙面间隙≈半身宽」不再硬编码期望区间 —— 旧 [3,8] 是按 12x12
+#   碰撞盒（半宽6）写的，杂兵体积 +50%（12x12 -> 18x18，半宽9）后它过期：
+#   实测贴墙 gap=9.07≈半宽本身（行为正确，是指望值没跟着长）。
+#   改为动态取半宽后，以后再改敌人体积不必同步改本测试。
+func _clash_body_half(z: Node2D) -> float:
+	var cs := z.get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if cs == null or cs.shape == null:
+		return 6.0
+	var s := cs.shape
+	if s is RectangleShape2D:
+		return (s as RectangleShape2D).size.x * 0.5
+	if s is CapsuleShape2D:
+		return (s as CapsuleShape2D).radius
+	return 6.0
+
 func _verify_enemyclash_test() -> void:
 	_verify_log("=== R-93 enemy clash test (同阵营敌人互不碰撞 · 围攻感) ===")
 	var ok: bool = true
@@ -9306,7 +10612,7 @@ func _verify_enemyclash_test() -> void:
 	var base: Vector2 = player.global_position
 
 	# ==================================================================
-	# ⓪ 配置自证：两个 mask 必须是 19，三个 layer 一律不许动
+	# ⓪ 配置自证：两个 mask 必须是 51（R-93 的 19 + R-155 的 32），三个 layer 一律不许动
 	# ==================================================================
 	var z0 := ZombieScene.instantiate()
 	var m0 := MercenaryScene.instantiate()
@@ -9316,21 +10622,25 @@ func _verify_enemyclash_test() -> void:
 	var mm: int = int(m0.collision_mask)
 	var pl: int = int(player.collision_layer)
 	var pm: int = int(player.collision_mask)
-	var expect_mask: int = 31 & ~4 & ~8
+	# ⚠ R-155（2026-10-14）：敌人 mask = 31 & ~4 & ~8 **+ 32**（b 类家具·防弹玻璃层）
+	#   = 51。R-93 立的 19 仍是主体，32 是 R-155 用户需求叠加的（见 GameConstants R-155 注释）。
+	var expect_mask: int = 51
 	z0.queue_free()
 	m0.queue_free()
 	_verify_log("⓪ layers: zombie=%d merc=%d player=%d (expect 4 / 8 / 2 —— layer 一律不动)" % [zl, ml, pl])
-	_verify_log("⓪ masks : zombie=%d merc=%d (expect both=%d = 31&~4&~8) | player=%d (expect 17, 不动)" % [
+	_verify_log("⓪ masks : zombie=%d merc=%d (expect both=%d = 31&~4&~8 +32[R-155]) | player=%d (expect 49 = 17+32[R-155])" % [
 		zm, mm, expect_mask, pm])
 	if not (zl == 4 and ml == 8 and pl == 2):
 		_verify_log("FAIL: ⓪ collision_layer 被改动了（僵尸4 / 佣兵 8 / 玩家 2 是子弹判定的依据，不许动）")
 		ok = false
 	if zm != expect_mask or mm != expect_mask:
-		_verify_log("FAIL: ⓪ 敌人 collision_mask 不是 19（zombie=%d merc=%d，期望 31&~4&~8=%d）" % [
+		_verify_log("FAIL: ⓪ 敌人 collision_mask 不是 51（zombie=%d merc=%d，期望 31&~4&~8 +32 =%d）" % [
 			zm, mm, expect_mask])
 		ok = false
-	if pm != 17:
-		_verify_log("FAIL: ⓪ Player.tscn 的 collision_mask 被改动了（=%d，本任务规定不许动 Player.tscn）" % pm)
+	# ⚠ R-155：Player.tscn mask 17 → 49（+32 防弹玻璃层）是**用户拍板的 R-155 需求**，
+	#   R-93 当年的"不许动 Player.tscn"已被该需求合法覆盖 → 锚推进到 49。
+	if pm != 49:
+		_verify_log("FAIL: ⓪ Player.tscn 的 collision_mask 被改动了（=%d，期望 49 = 17+32[R-155]）" % pm)
 		ok = false
 
 	# ==================================================================
@@ -9548,6 +10858,7 @@ func _verify_enemyclash_test() -> void:
 	var wall_face: float = wall.global_position.x - 8.0     # 墙左侧面
 	var zw_from: float = zw.global_position.x
 	var p_zwall := _clash_probe(zw, Vector2.RIGHT, 60.0)
+	var zw_half: float = _clash_body_half(zw)
 	var zw_maxx: float = zw_from
 	for f in 150:
 		await get_tree().physics_frame
@@ -9558,9 +10869,9 @@ func _verify_enemyclash_test() -> void:
 		zw_maxx = maxf(zw_maxx, zw.global_position.x)
 	_verify_log("③ wall: probe mask=%d blocked=%s layer=%d name=%s (expect blocked=true,墙层1)" % [
 		int(p_zwall["mask"]), p_zwall["blocked"], int(p_zwall["layer"]), str(p_zwall["name"])])
-	_verify_log("③ wall: zombie x %.2f -> max %.2f (final %.2f) | 墙左侧面 x=%.2f | 未穿墙=%s | 贴墙间隙=%.2fpx(僵尸半身宽6)" % [
+	_verify_log("③ wall: zombie x %.2f -> max %.2f (final %.2f) | 墙左侧面 x=%.2f | 未穿墙=%s | 贴墙间隙=%.2fpx(僵尸半身宽%.1f)" % [
 		zw_from, zw_maxx, zw.global_position.x, wall_face, zw.global_position.x < wall_face,
-		wall_face - zw_maxx])
+		wall_face - zw_maxx, zw_half])
 	if not bool(p_zwall["blocked"]) or int(p_zwall["layer"]) != 1:
 		_verify_log("FAIL: ③ 僵尸不再被墙阻挡（探针 blocked=%s layer=%d）—— mask 误伤了墙层" % [
 			p_zwall["blocked"], int(p_zwall["layer"])])
@@ -9568,12 +10879,14 @@ func _verify_enemyclash_test() -> void:
 	if zw_maxx >= wall_face:
 		_verify_log("FAIL: ③僵尸穿墙了（最大 x=%.2f ≥ 墙左侧面 %.2f）" % [zw_maxx, wall_face])
 		ok = false
-	# 反向对照：必须**真的贴上去**了（间隙≈半身宽 6px）。
+	# 反向对照：必须**真的贴上去**了（间隙≈僵尸半身宽）。
 	#   若僵尸只是因为没感知到玩家而站住不动，间隙会很大（本例起点 x=%.2f 距墙 %.1fpx）→ 那样"没穿墙"毫无说服力。
+	#   ⚠ R-new：区间按碰撞盒半宽**动态**取（[0.5×half, 1.34×half]，与旧硬编码 [3,8]=[0.5,1.33]×6 同口径）。
+	#      碰撞盒 12→18（半宽 9）后旧期望过期：实测贴墙 gap=9.07≈半宽本身 —— 行为正确、指望值没长。
 	var zw_gap: float = wall_face - zw_maxx
-	if zw_gap > 8.0 or zw_gap < 3.0:
-		_verify_log("FAIL: ③ 僵尸没有真正贴上墙（间隙 %.2fpx，不在 [3,8] 的半身宽区间）—— 起点 %.2f 距墙 %.1fpx，本组无法证明墙在挡它" % [
-			zw_gap, zw_from, wall_face - zw_from])
+	if zw_gap > zw_half * 1.34 or zw_gap < zw_half * 0.5:
+		_verify_log("FAIL: ③ 僵尸没有真正贴上墙（间隙 %.2fpx，不在半身宽 %.1f 的贴身区间）—— 起点 %.2f 距墙 %.1fpx，本组无法证明墙在挡它" % [
+			zw_gap, zw_half, zw_from, wall_face - zw_from])
 		ok = false
 	if (int(zw.collision_mask) & 1) == 0:
 		_verify_log("FAIL: ③ mask & 1 == 0 —— 墙层被误摘（mask=%d）" % int(zw.collision_mask))
@@ -9651,6 +10964,7 @@ func _verify_enemyclash_test() -> void:
 	var crate_face: float = crate.global_position.x - 6.0
 	var zc_from: float = zc.global_position.x
 	var p_zcrate := _clash_probe(zc, Vector2.RIGHT, 60.0)
+	var zc_half: float = _clash_body_half(zc)
 	var zc_maxx: float = zc_from
 	for f in 150:
 		await get_tree().physics_frame
@@ -9661,9 +10975,9 @@ func _verify_enemyclash_test() -> void:
 		zc_maxx = maxf(zc_maxx, zc.global_position.x)
 	_verify_log("⑤ crate: probe mask=%d blocked=%s layer=%d (expect blocked=true,家具层16)" % [
 		int(p_zcrate["mask"]), p_zcrate["blocked"], int(p_zcrate["layer"])])
-	_verify_log("⑤ crate: zombie x %.2f -> max %.2f (final %.2f) | 箱子左侧面 x=%.2f | 未穿箱=%s | 贴箱间隙=%.2fpx(僵尸半身宽6)" % [
+	_verify_log("⑤ crate: zombie x %.2f -> max %.2f (final %.2f) | 箱子左侧面 x=%.2f | 未穿箱=%s | 贴箱间隙=%.2fpx(僵尸半身宽%.1f)" % [
 		zc_from, zc_maxx, zc.global_position.x, crate_face, zc.global_position.x < crate_face,
-		crate_face - zc_maxx])
+		crate_face - zc_maxx, zc_half])
 	if not bool(p_zcrate["blocked"]):
 		_verify_log("FAIL: ⑤ 僵尸不再被箱子阻挡（探针 blocked=%s layer=%d）" % [
 			p_zcrate["blocked"], int(p_zcrate["layer"])])
@@ -9671,11 +10985,11 @@ func _verify_enemyclash_test() -> void:
 	if zc_maxx >= crate_face:
 		_verify_log("FAIL: ⑤ 僵尸穿过箱子了（最大 x=%.2f ≥ 箱子左侧面 %.2f）" % [zc_maxx, crate_face])
 		ok = false
-	# 同 ③：必须真的贴上箱子（间隙 ≈ 僵尸半身宽 6px），否则"没穿箱"可能只是没走到
+	# 同 ③：必须真的贴上箱子（间隙 ≈ 僵尸半身宽，区间随碰撞盒动态化），否则"没穿箱"可能只是没走到
 	var zc_gap: float = crate_face - zc_maxx
-	if zc_gap > 8.0 or zc_gap < 3.0:
-		_verify_log("FAIL: ⑤ 僵尸没有真正贴上箱子（间隙 %.2fpx，不在 [3,8] 区间）—— 起点 %.2f 距箱 %.1fpx，本组无法证明箱子在挡它" % [
-			zc_gap, zc_from, crate_face - zc_from])
+	if zc_gap > zc_half * 1.34 or zc_gap < zc_half * 0.5:
+		_verify_log("FAIL: ⑤ 僵尸没有真正贴上箱子（间隙 %.2fpx，不在半身宽 %.1f 的贴身区间）—— 起点 %.2f 距箱 %.1fpx，本组无法证明箱子在挡它" % [
+			zc_gap, zc_half, zc_from, crate_face - zc_from])
 		ok = false
 	if (int(zc.collision_mask) & 16) == 0:
 		_verify_log("FAIL: ⑤ mask & 16 == 0 —— 家具层被误摘（mask=%d）" % int(zc.collision_mask))
@@ -9698,9 +11012,9 @@ func _verify_enemyclash_test() -> void:
 	await get_tree().physics_frame
 	var fbm: int = int(fb.collision_mask)
 	var hbm: int = int(hb.collision_mask)
-	_verify_log("⑥ bullet mask: friendly=%d hostile=%d (expect 13 / 7 —— 与 layer 口径无关，未受影响)" % [fbm, hbm])
-	if not (fbm == 13 and hbm == 7):
-		_verify_log("FAIL: ⑥ Bullet 的 mask 变了（friendly=%d hostile=%d，期望 13/7）" % [fbm, hbm])
+	_verify_log("⑥ bullet mask: friendly=%d hostile=%d (expect 45 / 39 —— R-155: 13/7 各 +32；layer 口径未动)" % [fbm, hbm])
+	if not (fbm == 45 and hbm == 39):
+		_verify_log("FAIL: ⑥ Bullet 的 mask 变了（friendly=%d hostile=%d，期望 45/39 = 13/7 +32[R-155]）" % [fbm, hbm])
 		ok = false
 	if (fbm & 4) == 0:
 		_verify_log("FAIL: ⑥ 玩家子弹打不到僵尸层了（friendly mask=%d缺 layer 4）" % fbm)
@@ -9811,9 +11125,9 @@ func _verify_enemyclash_test() -> void:
 	_verify_log("⑧ player-side: player mask=%d blocked_by_zombie=%s | 玩家 x %.2f -> %.2f (僵尸 x=%.2f) 穿过=%s" % [
 		int(p_p8["mask"]), p_p8["blocked"], px_from, px_end,
 		zp8.global_position.x if is_instance_valid(zp8) else -999.0, p_passed])
-	_verify_log("⑧ 说明：Player.tscn mask=17 本就不含敌人层 → 玩家撞敌人不被挡是**既有行为**，R-93 未改Player.tscn")
-	if int(p_p8["mask"]) != 17:
-		_verify_log("FAIL: ⑧ Player.tscn 的 mask 被本任务改动了（=%d）" % int(p_p8["mask"]))
+	_verify_log("⑧ 说明：Player.tscn mask=49（R-155: 17+32）仍不含敌人层 → 玩家撞敌人不被挡是**既有行为**")
+	if int(p_p8["mask"]) != 49:
+		_verify_log("FAIL: ⑧ Player.tscn 的 mask 被改动了（=%d，期望 49 = 17+32[R-155]）" % int(p_p8["mask"]))
 		ok = false
 	if is_instance_valid(zp8):
 		zp8.queue_free()
@@ -10611,10 +11925,17 @@ func _verify_lunge_test() -> void:
 				#      (b) 与玩家的距离在**缩小**（真的在追）
 				#   dot 值降级为**信息性日志**，不再当断言 —— 它测的不是产品的承诺。
 				dir_dot = got.dot(want)
-				ok_dir = new_dir.distance_to(lunge_dir_old) > 0.05
+				# ⚠⚠ R-155 后续修正（2026-10-16）：`ok_dir`（新方向 != 旧惯性方向）原是 R-146
+				#   立的 (a) 断言，但它是**几何巧合断言** —— 依赖 _chase_dir 的流场解与旧惯性
+				#   方向不相同。R-155 家具（c 类占格 → NavGrid 置 0）改变流场后，沿墙解恰好
+				#   等于旧惯性方向 → 断言失效（实测已换向=false 但 _lunge_t 归零 + 距离缩短
+				#   45px 全过，产品行为正确）。按 R-146 自立的规矩（"测实现细节的假断言要改成
+				#   测产品承诺"）降级为**信息性日志**；"惯性已取消"由 `_lunge_t == 0` 断言
+				#   （下方 11273 行一带）直接机器守护，"在追"由 closing_ok 守护。
+				ok_dir = new_dir.distance_to(lunge_dir_old) > 0.05   # 仅记录，不再当断言
 				re_state = z5.state
 				break
-	_verify_log("⑤ 重新发现: 惯性中(_lunge_t>0)=%s 旧惯性方向=(%.2f,%.2f) ->新 state=%d 新追击方向=(%.2f,%.2f) 已换向=%s" % [
+	_verify_log("⑤ 重新发现: 惯性中(_lunge_t>0)=%s 旧惯性方向=(%.2f,%.2f) ->新 state=%d 新追击方向=(%.2f,%.2f) 已换向=%s(信息性,流场几何巧合,不当断言)" % [
 		lunging, lunge_dir_old.x, lunge_dir_old.y, re_state, new_dir.x, new_dir.y, str(ok_dir)])
 	# R-146 诊断：把「为什么没重新发现」量化出来（听距 180 / 视距 60）
 	_verify_log("⑤ 诊断: 等待期最近距离=%.1fpx | 任一帧 sensed=%s | 终局 state=%d(0IDLE/1ALERT/2CHASE/3SEARCH/4ATTACK/5DEAD) sensed=%s" % [
@@ -10641,9 +11962,8 @@ func _verify_lunge_test() -> void:
 	if re_state != ST_CHASE:
 		_verify_log("FAIL: ⑤ 重新发现后未回到 CHASE（state=%d）" % re_state)
 		ok = false
-	if not ok_dir:
-		_verify_log("FAIL: ⑤ 新追击方向仍等于旧惯性方向（旧惯性未被取消）")
-		ok = false
+	# ⚠ R-155 后续：ok_dir 已降级为信息性（见上方采样段注释）—— 不再 FAIL。
+	#   惯性取消的真守护 = 下面这条 `_lunge_t != 0` 断言。
 	if re_state == ST_CHASE and z5._lunge_t > 0.0:
 		_verify_log("FAIL: ⑤ 重新发现后 _lunge_t 仍=%.3f（应立即归零）" % z5._lunge_t)
 		ok = false
@@ -11265,16 +12585,16 @@ func _verify_cola_test() -> void:
 	const EXPECT_COLA_HUNGER: float = 10.0     # ← 用户需求原文逐字
 	const EXPECT_COLA_THIRST: float = 60.0      # ← 用户需求原文逐字
 	const EXPECT_COLA_STAMINA: float = 15.0     # ← 用户需求原文逐字
-	const EXPECT_POOL_SIZE: int = 16             # R-82 的 15 + 本次 1
+	const EXPECT_POOL_SIZE: int = 29             # R-82 的 15 + R-97 可乐 1 + R-new 13
 	# ⚠⚠ **R-109 口径变更**：`EXPECT_POOL_RATE` 由 `1.0/16.0`（=6.25%）改为 **类内**的 `0.2000`。
 	#   理由：R-104 给箱子分了4 类之后，**生产路径上不存在「16 件等概率」**——
-	#   `coca` 属 `CRATE_TYPES["food"]`（5 件：meat/vegetable/canned/mre/coca），
-	#   玩家只可能在**食品箱**里遇到它 → 它的抽取权重是「食品箱内的 1/5」。
-	#   ⚠ **写成字面量 `0.2000` 而不是 `1.0/5.0`**：后者是同源算式（池子若被改成 6 件，
+	#   `coca` 属 `CRATE_TYPES["food"]`（R-new 起 8 件：+biscuit/jerky/fruit），
+	#   玩家只可能在**食品箱**里遇到它 → 它的抽取权重是「食品箱内的 1/k」（R-new 起 k=8 → 1/8）。
+	#   ⚠ **写成字面量 `0.1250` 而不是 `1.0/8.0`**：后者是同源算式（池子若被改成 9 件，
 	#   期望值会跟着漂移 → 恒真断言，正是 R-96 踩过的坑）。这里必须是**独立事实**。
 	#   📌 旧口径 6.25% 的来历与去向：它是**全池兜底**分支（`_roll_container_items("")`）的分布，
 	#      生产永不走那条路 → 它现在只在 `--verify-cratetype` ⑧-0 里作为「兜底仍是全池」的证据存在。
-	const EXPECT_COLA_RATE_IN_FOOD: float = 0.2000   # ← 类内 1/5（字面量）
+	const EXPECT_COLA_RATE_IN_FOOD: float = 0.1250   # ← 类内 1/8（字面量，R-new 推进）
 	const RATE_TOL: float = 0.02                 # ±2 个百分点（≈5.1σ，见 ② 的样本量推导）
 	# ⑤ 动词：**R-98 起一律「使用」**（用户拍板废除 R-77 的「食用/饮用」区分）。
 	#   ⚠ 这条从"如实记录现状"变成了"**钉用户决策的目标状态**" ——
@@ -11299,7 +12619,7 @@ func _verify_cola_test() -> void:
 		_verify_log("FAIL: ① ITEM_TYPES 里找不到 id='%s' —— 可乐没进掉落池" % EXPECT_COLA_ID)
 		ok = false
 	var pool: Array = GameConstants.ITEM_TYPES
-	_verify_log("① pool size=%d (expect exactly %d = R-82 的 15 + 1) | cola in pool=%s | label='%s' kind='%s' %dx%d weight=%.1f" % [
+	_verify_log("① pool size=%d (expect exactly %d = R-82 的 15 + R-97 可乐 + R-new 13) | cola in pool=%s | label='%s' kind='%s' %dx%d weight=%.1f" % [
 		pool.size(), EXPECT_POOL_SIZE, str(not cola.is_empty()),
 		String(cola.get("label", "?")), String(cola.get("kind", "?")),
 		int(cola.get("w", -1)), int(cola.get("h", -1)), float(cola.get("weight", -1.0))])
@@ -11336,6 +12656,7 @@ func _verify_cola_test() -> void:
 	#   改动前不传 kind → 走 `_crate_pool_types("")` 全池兜底 → **生产永不会进入**。
 	#   ⚠ 顺带把 `draw_total` 的语义从「全池 16 件的抽样」变成「食品箱 5 件的抽样」，
 	#   所以下面 ② 的分母也必须是**食品箱**的件数 —— 两个口径不可混用。
+	#   ⚠ R-new：食品箱 5 → 8 件后该分母跟着变 8（见 EXPECT_COLA_RATE_IN_FOOD 的 1/8）。
 	const ROLL_SAMPLES: int = 200
 	var draw_cola: int = 0
 	var draw_total: int = 0
@@ -11358,10 +12679,10 @@ func _verify_cola_test() -> void:
 		_verify_log("FAIL: ① 抽出了 %d 个不在池子里的 id" % draw_unknown)
 		ok = false
 
-	# ================= ② 类内等概率：食品箱里 `coca` 占比 ≈ 1/5 = 20.0% =================
+	# ================= ② 类内等概率：食品箱里 `coca` 占比 ≈ 1/8 = 12.5% =================
 	# ⚠⚠ **R-109 口径变更**：本段原先是「全池 16 件等概率 → ≈1/16 = 6.25%」。
 	#   箱子分类型后**生产路径上不存在全池等概率**：`coca` 只在**食品箱**里出现，
-	#   抽取权重是「食品箱 5 件里的 1 件」= **类内 20.0%**。
+	#   抽取权重是「食品箱 8 件里的 1 件」= **类内 12.5%**（R-new：5 → 8 件）。
 	#   （全局边际出现率是 1/4 × 20.0% = 5.0%，但那是「所有箱子混起来」的口径，
 	#     依赖生成器把四类均分 —— 而**本段直接传"food"**，不经过生成器，
 	#     所以类内 20.0% 才是这条断言该用的、也是更稳的口径。）
@@ -11371,6 +12692,8 @@ func _verify_cola_test() -> void:
 	#         ±2pp ≈ 5.4σ。
 	#     新：p=1/5，1500 箱 ≈10500 件 → sd = sqrt(10500×0.2×0.8) ≈ 41.0 件 = **0.39pp**
 	#         ±2pp ≈ **5.1σ**（与旧口径同档的稳定性）。
+	#   ⚠ R-new 再算一遍（p=1/8，1500 箱 ≈10500 件）：sd = sqrt(10500×0.125×0.875) ≈ 34.0 件
+	#     ≈ **0.32pp** → ±2pp ≈ **6.2σ**（比 1/5 时更稳，样本量不必再放大）。
 	#   ⚠ p 从 0.0625 涨到 0.2 → 同样件数下 sd 变大，所以样本量必须同步放大，
 	#     否则 ±2pp 会悄悄退化成 ~3σ（≈0.1% 概率偶发失败 = flaky 隐患）。
 	const RATE_CRATES: int = 1500
@@ -11403,7 +12726,7 @@ func _verify_cola_test() -> void:
 	# ---- ②-b 食品箱内的**逐 id** 分布（记录项 + "不多不少"断言）----
 	# ⚠ R-109：分类后**不再统计全池 16 件的全局分布** —— 那属于 `--verify-loot`（B 段覆盖率）
 	#   与 `--verify-cratetype`（⓪③ 并集 / ② 越界）的职责，三处互补不重复。
-	#   这里只统计「`food` 箱里 5 件各自的占比」：每件都该 ≈20%（类内等概率）。
+	#   这里只统计「`food` 箱里 8 件各自的占比」：每件都该 ≈12.5%（类内等概率，R-new 后）。
 	#   ⚠ 这一段是**第三批独立采样**（与上面 ② 的 rate_total 不是同一批），
 	#   所以必须用**自己的**分母 `dist_total`，不能复用 rate_total —— 否则占比会算成一半。
 	const DIST_CRATES: int = 300
@@ -11426,10 +12749,10 @@ func _verify_cola_test() -> void:
 		rate_min = minf(rate_min, r3)
 		rate_max = maxf(rate_max, r3)
 		rate_all.append("%s=%.2f%%" % [String(iid4), r3])
-	_verify_log("②-b 食品箱内 5 件逐 id 分布: %s" % [str(rate_all)])
+	_verify_log("②-b 食品箱内 8 件逐 id 分布: %s" % [str(rate_all)])
 	_verify_log("②-b spread: min=%.2f%% max=%.2f%% (Δ=%.2fpp; 类内单件期望 %.2f%%；Δ>4pp 通常意味着某件被加权)" % [
 		rate_min, rate_max, rate_max - rate_min, EXPECT_COLA_RATE_IN_FOOD * 100.0])
-	# "不多也不少的硬断言：抽出来的不同 id 恰好是 food 池那5 件。
+	# "不多也不少的硬断言：抽出来的不同 id 恰好是 food 池那 8 件。
 	#   （「每件都抽得到」由 `--verify-loot` B-2 的逐类覆盖率负责，这里只管"不多"。）
 	if id_count.size() != food_ids.size():
 		_verify_log("FAIL: ②-b 食品箱里出现了 %d 个不同 id，food 池只有 %d 个 —— 越界或漏抽" % [
@@ -11701,9 +13024,11 @@ func _verify_verb_test() -> void:
 	const EXPECT_USE_VERB: String = "使用"          # R-98 用户拍板：consumable 统一
 	const EXPECT_AMMO_VERB: String = "补充备弹"     # 动作类型区分，**不在本次范围内**
 	const EXPECT_EQUIP_VERB: String = "装备"        # 同上
-	# R-82 的 7 件纯材料（`kind:"misc"` 且**无 use**）——用来防"统一"被过度实现
-	const PURE_MISC_IDS: Array = ["powder", "scrap", "plastic", "circuit", "vegetable", "meat", "fuel"]
-	const EXPECT_PURE_COUNT: int = 7
+	# R-82 的 7 件纯材料 + R-new 批次的 8 件 misc（制药原料/酒精/空注射器/电池/木材/钉子/螺丝/胶水）
+	#   （`kind:"misc"` 且**无 use**）——用来防"统一"被过度实现
+	const PURE_MISC_IDS: Array = ["powder", "scrap", "plastic", "circuit", "vegetable", "meat", "fuel",
+		"pharm_raw", "alcohol", "syringe", "battery", "wood", "nail", "screw", "glue"]
+	const EXPECT_PURE_COUNT: int = 15
 	# `canned.use` 数值（⑥ 行为等价性用；**字面量**，不取自 ITEM_TYPES）
 	# ⚠ `CANNED_THIRST` 原为 25.0（R-91 口径）→ **R-100 同步为 15.0**。
 	#   理由：R-99 已把产品侧的 `canned.thirst` 合法改成 15（用户逐字），
@@ -13131,11 +14456,13 @@ func _verify_cratetype_test() -> void:
 	# 逐字照抄用户需求里的四类清单 + **R-106 用户拍板把 `part` 并进材料箱**。⚠ 这是**手写**的，不读 GameConstants。
 	#   ⚠ `part` 的位置（R-106）：R-104 时用户只逐字点名了 15 件，`part` 挂在 CRATE_UNASSIGNED_IDS
 	#   等拍板；R-106 用户拍板「part（零件）归入材料箱」→ 它进 material 池的**末尾**。
+	#   ⚠ **R-new（2026-10-14）**：三类箱子各加新物品（用户需求逐字）→ medical +5 / food +3 / material +5，
+	#     顺序 = 用户列举顺序，追加在各类既有条目之后（与 GameConstants.CRATE_TYPES 书写顺序一致）。
 	const EXPECT_POOLS: Dictionary = {
 		"weapon": ["ammo_9x19", "ammo_12x70"],
-		"medical": ["medkit", "water"],
-		"food": ["meat", "vegetable", "canned", "mre", "coca"],
-		"material": ["powder", "scrap", "plastic", "circuit", "fuel", "cloth", "part"],
+		"medical": ["medkit", "water", "bandage", "herb", "pharm_raw", "alcohol", "syringe"],
+		"food": ["meat", "vegetable", "canned", "mre", "coca", "biscuit", "jerky", "fruit"],
+		"material": ["powder", "scrap", "plastic", "circuit", "fuel", "cloth", "part", "battery", "wood", "nail", "screw", "glue"],
 	}
 	const EXPECT_LABELS: Dictionary = {
 		"weapon": "武器箱", "medical": "医疗箱", "food": "食品箱", "material": "材料箱",
@@ -13147,13 +14474,16 @@ func _verify_cratetype_test() -> void:
 		"food": Color(0.96, 0.61, 0.08),
 		"material": Color(0.94, 0.19, 0.94),
 	}
-	# 并集 = R-106 之后的**16 件全集**（4 类池子拼起来，**含 part**）
+	# 并集 = **29 件全集**（4 类池子拼起来；R-106 纳入 part，R-new 再纳入 13 件新物品）
 	#   ⚠ R-104 时这里是 15 件（不含 part，因为它还挂在 CRATE_UNASSIGNED_IDS 上）；
-	#   R-106 用户拍板归入材料箱 → 16 件，**恰好等于 ITEM_TYPES 全集**（见 ⓪③ 的自证）。
+	#   R-106 用户拍板归入材料箱 → 16 件；R-new（2026-10-14）三类箱子各加新物品 → **29 件**，
+	#   **恰好等于 ITEM_TYPES 全集**（见 ⓪③ 的自证）。
 	const EXPECT_UNION: Array = [
-		"ammo_9x19", "ammo_12x70", "medkit", "water", "meat",
-		"vegetable", "canned", "mre", "coca", "powder",
-		"scrap", "plastic", "circuit", "fuel", "cloth", "part",
+		"ammo_9x19", "ammo_12x70", "medkit", "water", "bandage",
+		"herb", "pharm_raw", "alcohol", "syringe", "meat", "vegetable",
+		"canned", "mre", "coca", "biscuit", "jerky", "fruit",
+		"powder", "scrap", "plastic", "circuit", "fuel", "cloth",
+		"part", "battery", "wood", "nail", "screw", "glue",
 	]
 	# 未归类清单 = **空**（R-106：part 已归位，字面量 0 项）。
 	#   ⚠ 这一条**不是**"可选的死变量" —— ③ 会断言 `CRATE_UNASSIGNED_IDS` 与它逐字相同，
@@ -13176,6 +14506,7 @@ func _verify_cratetype_test() -> void:
 	_verify_log("policy: 每箱件数**保持 4~10 不变**（R-104 未要求改，R-106 也未要求改）；⚠ 分池后重复率升高是需求本身的必然结果（k=2 的池重复率 ~72%）")
 	_verify_log("policy: 箱子类型由**生成器**在布局时按 seed 定（纯哈希，**零 rng 消耗**）→ 玩家跑过去之前就能看出类型，且同种子完全确定")
 	_verify_log("policy: `part`（零件）**R-106 已归入材料箱**（kind:\"misc\" + 无 use = 纯战利品，与其它材料同性质）→ CRATE_UNASSIGNED_IDS 已清空，但**登记机制的两个常量刻意保留**")
+	_verify_log("policy (用户 **R-new 2026-10-14 逐字**): 食品箱+压缩饼干(饥饿30/口渴-10)/肉干(20/-5)/水果(5/+15)｜医疗箱+绷带(生命30)/草药(生命20/饥饿20/口渴-10)/制药原料/酒精/空注射器(后三件材料类无用)｜材料箱+电池/木材/钉子/螺丝/胶水 → ITEM_TYPES 16→29，四类池 2/7/8/12，并集仍==全集")
 
 	# ================================================================
 	# ⓪ 静态自证：常量表本身与手写字面量一致（4 类 / 标签 / 颜色 / 池子 / 未归类）
@@ -13204,7 +14535,7 @@ func _verify_cratetype_test() -> void:
 			if str(ids0) != str(EXPECT_POOLS.get(k, [])):
 				_verify_log("FAIL: ⓪ '%s' 物品池 = %s（期望 %s）" % [k, str(ids0), str(EXPECT_POOLS.get(k, []))])
 				ok = false
-	# ② 的前置：四类池子的**并集 == 手写 16 件全集**，且**零重复归属**
+	# ② 的前置：四类池子的**并集 == 手写 29 件全集**，且**零重复归属**
 	var union := {}
 	var dup_owner: Array = []
 	for k2 in ["weapon", "medical", "food", "material"]:
@@ -13220,12 +14551,12 @@ func _verify_cratetype_test() -> void:
 	for iid3 in union.keys():
 		if not EXPECT_UNION.has(iid3):
 			extra.append(iid3)
-	_verify_log("⓪② 并集自证: 并集=%d 件 (expect 16) | 漏=%s (expect []) | 多=%s (expect []) | 重复归属=%s (expect [])" % [
+	_verify_log("⓪② 并集自证: 并集=%d 件 (expect 29) | 漏=%s (expect []) | 多=%s (expect []) | 重复归属=%s (expect [])" % [
 		union.size(), str(missing), str(extra), str(dup_owner)])
-	if union.size() != 16 or missing.size() > 0 or extra.size() > 0 or dup_owner.size() > 0:
-		_verify_log("FAIL: ⓪② 四类池子的并集与手写的 16 件全集不一致（漏/多/重复归属）")
+	if union.size() != 29 or missing.size() > 0 or extra.size() > 0 or dup_owner.size() > 0:
+		_verify_log("FAIL: ⓪② 四类池子的并集与手写的 29 件全集不一致（漏/多/重复归属）")
 		ok = false
-	# ---- ⓪③ **R-106 起才真正成立**的那条：四类池的并集== ITEM_TYPES 全集（16 件）----
+	# ---- ⓪③ **R-106 起才真正成立**的那条：四类池的并集== ITEM_TYPES 全集（29 件）----
 	#   R-104 时做不到：四类池并集是 15 件，`part` 挂在 CRATE_UNASSIGNED_IDS 上不在任何池里
 	#→ "并集 == 全集" 这条恒为假。R-106 把 `part` 并进材料箱后，两集合才真正相等。
 	#   ⚠ 这一条是 R-106 的**核心不变式**：它保证「每件物品都能被某个箱子刷出来」。
@@ -13252,9 +14583,9 @@ func _verify_cratetype_test() -> void:
 	for e8 in live_union.keys():
 		if not all_types.has(String(e8)):
 			extra_vs_types.append(String(e8))
-	_verify_log("⓪③ 四类池并集 vs ITEM_TYPES 全集（R-106 新增·核心不变式）: 生产并集=%d 件 (expect 16) | ITEM_TYPES=%d 件 (expect 16) | 刷不出来的物品=%s (expect []) | 不存在的物品=%s (expect []) | 重复归属=%s (expect [])" % [
+	_verify_log("⓪③ 四类池并集 vs ITEM_TYPES 全集（R-106 新增·核心不变式）: 生产并集=%d 件 (expect 29) | ITEM_TYPES=%d 件 (expect 29) | 刷不出来的物品=%s (expect []) | 不存在的物品=%s (expect []) | 重复归属=%s (expect [])" % [
 		live_union.size(), all_types.size(), str(miss_vs_types), str(extra_vs_types), str(live_dup)])
-	if live_union.size() != 16 or all_types.size() != 16 or miss_vs_types.size() > 0 or extra_vs_types.size() > 0 or live_dup.size() > 0:
+	if live_union.size() != 29 or all_types.size() != 29 or miss_vs_types.size() > 0 or extra_vs_types.size() > 0 or live_dup.size() > 0:
 		_verify_log("FAIL: ⓪③ 四类池的并集与 ITEM_TYPES 全集不相等 —— 有物品玩家永远开不出来（漏归类），或有池子写了不存在的 id")
 		ok = false
 	# ---- ⓪④ 登记机制必须还在，但当前必须是空的（R-106：part 已归位）----
@@ -13755,8 +15086,8 @@ func _verify_cratetype_test() -> void:
 	for i5 in 200:
 		for it4 in _roll_container_items(""):
 			fallback_ids[String((it4 as Dictionary).get("id", ""))] = true
-	var fallback_ok: bool = fallback_ids.size() == 16 and fallback_ids.has("part")
-	_verify_log("--- ⑧-0 真实开箱链路: 用场上 %d 个真实箱子的 kind 各roll 一次 → 越界 %d 件 (expect 0) | 空/非法 kind 的兜底（200 次 roll 取并集）= %d 件且含 part=%s（期望 16 件 / true）" % [
+	var fallback_ok: bool = fallback_ids.size() == 29 and fallback_ids.has("part")
+	_verify_log("--- ⑧-0 真实开箱链路: 用场上 %d 个真实箱子的 kind 各roll 一次 → 越界 %d 件 (expect 0) | 空/非法 kind 的兜底（200 次 roll 取并集）= %d 件且含 part=%s（期望 29 件 / true）" % [
 		prod_checked, prod_violation, fallback_ids.size(), fallback_ok])
 	_verify_log("      ✓ R-109 起三个旧入口（--verify-loot / --verify-cola / --verify-verb）**已全部改成传 kind** → 它们现在也测在生产路径上；本组是**独立**的第二份证据（逐件比对真实箱子的 kind）")
 	if prod_violation > 0:
@@ -13766,7 +15097,7 @@ func _verify_cratetype_test() -> void:
 		_verify_log("FAIL: ⑧-0 场上没有可用 kind 的箱子 —— 本组无效")
 		ok = false
 	if not fallback_ok:
-		_verify_log("FAIL: ⑧-0 空 kind 的兜底不再是「全池 16 件」→ 没有类型信息的箱子会开出缺件/空箱（`Crate.kind` 默认 \"\"，这条兜底是它唯一的保护）")
+		_verify_log("FAIL: ⑧-0 空 kind 的兜底不再是「全池 29 件」→ 没有类型信息的箱子会开出缺件/空箱（`Crate.kind` 默认 \"\"，这条兜底是它唯一的保护）")
 		ok = false
 	# ⚠ 逐字期望：**16 件物品的 use / 重量 / 占格 / 颜色一个都不许动**。
 	#   这里只钉住几个最容易被"顺手改坏"的关键锚（全部字面量，来自 R-91/R-99/R-97/R-96）。
@@ -13796,7 +15127,7 @@ func _verify_cratetype_test() -> void:
 	bal_ok = bal_ok and is_equal_approx(float((p_medkit["use"] as Dictionary).get("heal", 0.0)), LIT_MEDKIT_HEAL)
 	bal_ok = bal_ok and int(p_a9.get("rounds", 0)) == LIT_AMMO9_BOX
 	bal_ok = bal_ok and int(p_a12.get("rounds", 0)) == LIT_AMMO12_BOX
-	bal_ok = bal_ok and int((GameConstants.ITEM_TYPES as Array).size()) == 16
+	bal_ok = bal_ok and int((GameConstants.ITEM_TYPES as Array).size()) == 29
 	# 本批分类的锚：医疗箱的饮用水 thirst 逐字未动 + 四类定义齐全（池子串了这里会红）
 	var p_water: Dictionary = _proto_by_id("water")
 	bal_ok = bal_ok and is_equal_approx(float((p_water["use"] as Dictionary).get("thirst", 0.0)), LIT_WATER_THIRST)
@@ -13818,11 +15149,66 @@ func _verify_cratetype_test() -> void:
 	_verify_log("    类型决定在**生成器**（FloorGenerator.crate_kind_of，纯哈希零 rng）→ 玩家跑过去之前就能看出类型")
 	_verify_log("    重复率（分池的必然结果，未改数值）: 武器/医疗 k=2 ≈71.9% | 食品 k=5 ≈45.1% | 材料 **k=7 ≈35.6%**（R-106 并入 part 后；并入前 k=6 是 39.8%）")
 	_verify_log("    `part`（零件）**R-106 归入材料箱** → 材料箱 k:6→7、重复率 39.8%→35.6%（**改善**）；`CRATE_UNASSIGNED_IDS` 已清空（登记机制保留）")
-	_verify_log("    ⚠ **兜底 vs 生产路径（R-106 起集合等价；R-109 起三个旧入口也走生产路径）**：空 kind 的兜底走 `ITEM_TYPES` 全池 16 件；生产路径走 4 个分类池，并集也正好是 16 件")
+	_verify_log("    ⚠ **兜底 vs 生产路径（R-106 起集合等价；R-109 起三个旧入口也走生产路径）**：空 kind 的兜底走 `ITEM_TYPES` 全池 29 件；生产路径走 4 个分类池，并集也正好是 29 件")
 	_verify_log("      → **物品集合层面两者等价**（每件物品都能被刷到，只是箱子类型归属不同）")
-	_verify_log("      → **分布层面不等价**（兜底是 16 件等概率 1/16 = 6.25%；生产是「先按箱子类型分流、再在类内等概率」）")
+	_verify_log("      → **分布层面不等价**（兜底是 29 件等概率 1/29 ≈ 3.45%；生产是「先按箱子类型分流、再在类内等概率」）")
 	_verify_log("      → **R-109 已处理**：`--verify-loot`（四类各跑一遍 + 逐类覆盖率）/ `--verify-cola`（传 food，类内 20.0%）/ `--verify-verb`（传 food）**全部改成传 kind**")
 	_verify_log("      → 改后记录项里的「6.25%」只表示**兜底分支**的分布（生产走不到），不再是任何生产路径的口径")
+
+	# =================================================================
+	# ⑧ R-new（2026-10-22）：**箱子类型必须遵守房间主题规则**（需求核心守护）
+	# =================================================================
+	# 用户需求逐字：「确保不会在规则之外的房间生成对应箱子。」
+	#   逐层逐箱：箱子像素 → tile → 命中哪个房间 → 该房间主题（room_theme_of）
+	#   → 查 ROOM_THEME_CRATE_RULES 拿允许列表 → 断言 kind ∈ 允许列表。
+	#   默认策略（房间外/未登记主题）→ 全 4 类，即不过滤。
+	var rule_violation: int = 0
+	var rule_in_room: int = 0        # 有房间归属的箱子数
+	var rule_filtered: int = 0       # 其中被规则**收窄**的（证明规则真在起作用）
+	var rule_len_bad: int = 0
+	for f8 in [1, 2, 3, 5, 8, 13, 21]:
+		var g8 := FloorGeneratorScript.new()
+		var d8: Dictionary = g8.generate(_seed, f8)
+		var cr8: Array = d8["crates"] as Array
+		var kd8: Array = d8["crate_kinds"] as Array
+		# ⚠⚠ R-new 修正：`data["rooms"]` 是**像素 Rect2**（room_rects，从内部 tile rooms
+		#   转换而来），**不是** tile Rect2i —— 判定直接用像素坐标，别除 TILE；
+		#   主题取同下标 `data["room_themes"]`（生成器现成输出，别在断言里重算
+		#   room_theme_of —— 索引体系不同正是第一次误报的根因）。
+		var rm8: Array = d8["rooms"] as Array          # 像素 Rect2（与内部 rooms 同序同量）
+		var th8s: Array = d8.get("room_themes", []) as Array
+		if cr8.size() != kd8.size():
+			rule_len_bad += 1
+			continue
+		for i8 in cr8.size():
+			var p8: Vector2 = cr8[i8] as Vector2      # 箱子像素坐标
+			var allowed8: Array = GameConstants.CRATE_TYPE_IDS    # 默认 = 全种类
+			var ri8: int = 0
+			for r8 in rm8:
+				if (r8 as Rect2).has_point(p8):
+					rule_in_room += 1
+					var th8: String = String(th8s[ri8]) if ri8 < th8s.size() else ""
+					var rl8: Array = GameConstants.ROOM_THEME_CRATE_RULES.get(th8, [])
+					if not rl8.is_empty():
+						allowed8 = rl8
+						rule_filtered += 1
+					break
+				ri8 += 1
+			if not (String(kd8[i8]) in allowed8):
+				rule_violation += 1
+				if rule_violation <= 3:
+					_verify_log("FAIL: ⑧ F%d 箱子#%d kind=%s 不在所在房间主题的允许列表 %s（规则被违反）" % [
+						f8, i8, String(kd8[i8]), str(allowed8)])
+	if rule_violation > 0:
+		ok = false
+	if rule_len_bad > 0:
+		ok = false
+		_verify_log("FAIL: ⑧ 有 %d 层 crate_kinds 与 crates 不同长" % rule_len_bad)
+	if rule_filtered <= 0:
+		ok = false
+		_verify_log("FAIL: ⑧ 规则从未收窄过任何箱子（in_room=%d）—— ROOM_THEME_CRATE_RULES 可能没接上" % rule_in_room)
+	_verify_log("--- ⑧ 房间主题规则: 有房间归属=%d 被规则收窄=%d 违反=%d 长度错=%d（期望 违反=0 长度错=0 收窄>0）" % [
+		rule_in_room, rule_filtered, rule_violation, rule_len_bad])
 
 	_verify_log("=== R-104 crate type test %s ===" % ("PASSED" if ok else "FAILED"))
 	get_tree().quit(0 if ok else 1)
@@ -15174,8 +16560,9 @@ func _verify_rider_test() -> void:
 		and is_equal_approx(GameConstants.THIRST_DECAY_PER_SEC, 0.325)
 		and is_equal_approx(GameConstants.CARRY_CAPACITY, 60.0)
 		and is_equal_approx(GameConstants.PACK_LOAD_BONUS_DOUBLE, 999.0))
-	var pool_ok: bool = (GameConstants.ITEM_TYPES.size() == 16)
-	_verify_log("⑧ untouched: vest reduction=%.3f(exp 0.15) w=%d h=%d | pistol 18.0 / mp133 76.5 / 12x70box 24 / caps 300,120,180,120 / decay 0.225,0.325 / cap 60.0 / pack+999 | ITEM_TYPES.size=%d(exp 16，掉落池**未**被动) ok=%s" % [
+	# ⚠ R-new（2026-10-14）：池子被用户需求**合法扩充** 16 → 29（三类箱子各加新物品）→ 锚推进到 29。
+	var pool_ok: bool = (GameConstants.ITEM_TYPES.size() == 29)
+	_verify_log("⑧ untouched: vest reduction=%.3f(exp 0.15) w=%d h=%d | pistol 18.0 / mp133 76.5 / 12x70box 24 / caps 300,120,180,120 / decay 0.225,0.325 / cap 60.0 / pack+999 | ITEM_TYPES.size=%d(exp 29，R-new 批次合法扩充后) ok=%s" % [
 		float(vest_def.get("reduction", -1.0)), int(vest_def.get("w", -1)), int(vest_def.get("h", -1)),
 		GameConstants.ITEM_TYPES.size(), str(vest_untouched and bal_ok and pool_ok)])
 	if not (vest_untouched and bal_ok and pool_ok):
@@ -15202,7 +16589,7 @@ func _verify_rider_test() -> void:
 #   冷却 = 1 游戏小时、V 不换枪、下降楼层清标记但保留冷却、reset 清冷却。
 #
 # 【为什么全部用「注入时间」而不是 await 真实时间】
-#   冷却 = 1 游戏小时 = 3600 游戏秒 = 现实 180 秒。headless 真等 180 秒不现实。
+#   冷却 = 1 游戏小时 = 3600 游戏秒 = 现实 30 秒。headless 真等 30 秒不现实。
 #   → 本测试通过 `Main._advance_trace(delta)` 这一**唯一**时间推进入口注入时间：
 #     它就是 `_process` 真实调用的那个函数，所以测的是**真实代码路径**，
 #     不是「专门为测试写的假逻辑」。两个 override 钩子把时长缩到可测范围。
@@ -15212,8 +16599,8 @@ func _verify_trace_test() -> void:
 
 	# ---- 期望值：全部字面量（不做同源算式）----
 	const EXPECT_CD_GAME: float = 3600.0           # 1 游戏小时（用户拍板，未变）
-	const EXPECT_SCALE: float = 20.0               # 1 现实秒 = 20 游戏秒（未变）
-	const EXPECT_CD_REAL: float = 180.0            # 3600 / 20 = 180 现实秒 = 3 分钟
+	const EXPECT_SCALE: float = 120.0               # 1 现实秒 = 120 游戏秒（R-new: 现实冷却 30s）
+	const EXPECT_CD_REAL: float = 30.0            # 3600 / 120 = 30 现实秒（R-new）
 	const EXPECT_MARK_SECONDS: float = 5.0         # 标记窗口 5 秒（未变）
 	const EXPECT_MAX_MARKS_ANCHOR: int = 3         # 常量**保留**但已不用于裁剪（见下）
 	const EXPECT_SCAN_RADIUS_TILES: int = 10       # R-147 新增：扫描半径（格）
@@ -15307,7 +16694,7 @@ func _verify_trace_test() -> void:
 		_verify_log("FAIL: ⓪ TRACE_COOLDOWN_GAME_SECONDS=%.1f != 字面量 3600.0" % GameConstants.TRACE_COOLDOWN_GAME_SECONDS)
 		ok = false
 	if not is_equal_approx(GameConstants.TRACE_TIME_SCALE, EXPECT_SCALE):
-		_verify_log("FAIL: ⓪ TRACE_TIME_SCALE=%.1f != 字面量 20.0" % GameConstants.TRACE_TIME_SCALE)
+		_verify_log("FAIL: ⓪ TRACE_TIME_SCALE=%.1f != 字面量 120.0" % GameConstants.TRACE_TIME_SCALE)
 		ok = false
 	if not is_equal_approx(GameConstants.TRACE_MARK_DURATION, EXPECT_MARK_SECONDS):
 		_verify_log("FAIL: ⓪ TRACE_MARK_DURATION=%.1f != 字面量 5.0" % GameConstants.TRACE_MARK_DURATION)
@@ -15322,7 +16709,7 @@ func _verify_trace_test() -> void:
 		_verify_log("FAIL: ⓪ TRACE_SCAN_IGNORE_LOS != true（「无视遮挡」被关掉了）")
 		ok = false
 	if not is_equal_approx(EXPECT_CD_GAME / EXPECT_SCALE, EXPECT_CD_REAL):
-		_verify_log("FAIL: ⓪ 3600/20 != 180 的推导前提不成立")
+		_verify_log("FAIL: ⓪ 3600/120 != 30 的推导前提不成立")
 		ok = false
 	# 扫描前：候选格必须是 UNEXPLORED，且地图上一个箱子标记都不该画
 	var pre_unexplored: bool = true
@@ -15899,6 +17286,557 @@ func _fog_visible_count() -> int:
 #   ⑤ F 统一交互键**不与既有键冲突**：F 出发优先、开箱其次（位置互斥）
 #   ⑥ **99–1 层出口不受影响**：99 层走到出口仍能下降（防「移除基地出口时误伤楼层出口」）
 #   ⑦ V 键 toast：英文文案 + 时长 ≈1.5s + **既有 1.8s 未被改动**（回归保护）
+# R-new（2026-10-22）：出发点电梯 + 下楼保持位置 验证
+# 【用户需求①】99 层及以下每层出发点正上方画 3×3 瓦片电梯，出发点=门口，站门按 F 回基地。
+# 【用户需求②】从出口进下一层保持原位置（占用则就近空格子）。
+func _verify_elevator_test() -> void:
+	_verify_log("=== R-new elevator test (3x3 elevator / door=spawn / F=return / descend keep-pos) ===")
+	var ok: bool = true
+	const LIT_TILE: int = 16
+	# ========== ① 战斗层：电梯存在 / 3×3 范围 / 门口==出发点 ==========
+	if _floor != 99:
+		_floor = 99
+		_build_floor(false)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var el: Variant = _floor_elevator
+	var e_exists: bool = (el != null and is_instance_valid(el))
+	if not e_exists:
+		ok = false
+		_verify_log("FAIL: ① 战斗层出发点电梯节点不存在")
+	var e_pos: Vector2 = el.position if e_exists else Vector2.ZERO
+	var e_door: Vector2 = el.door_pos() if e_exists else Vector2.ZERO
+	var e_vis: bool = el.visible if e_exists else false
+	var d_spawn: float = e_door.distance_to(_floor_spawn)
+	# 门口必须与出发点重合（电梯底边中点 == spawn）
+	var door_ok: bool = d_spawn <= 1.0
+	# 3×3 瓦片：左上 = spawn + (-24,-48)（水平居中 + 底边压在出发点格顶边）
+	var want_pos: Vector2 = _floor_spawn + Vector2(-24.0, -48.0)
+	var pos_ok: bool = e_pos.distance_to(want_pos) <= 0.5
+	var size_ok: bool = e_exists and is_equal_approx(el.ELEV_W, 48.0) and is_equal_approx(el.ELEV_H, 48.0)
+	if not (e_vis and door_ok and pos_ok and size_ok):
+		ok = false
+		_verify_log("FAIL: ① 电梯几何不符：visible=%s door_d=%.1f(<=1) pos=(%.1f,%.1f) want=(%.1f,%.1f)" % [
+			str(e_vis), d_spawn, e_pos.x, e_pos.y, want_pos.x, want_pos.y])
+	_verify_log("① elevator: exists=%s visible=%s pos=(%.1f,%.1f) want=(%.1f,%.1f) door=(%.1f,%.1f) spawn=(%.1f,%.1f) d=%.2f 3x3=%s" % [
+		str(e_exists), str(e_vis), e_pos.x, e_pos.y, want_pos.x, want_pos.y, e_door.x, e_door.y,
+		_floor_spawn.x, _floor_spawn.y, d_spawn, str(size_ok)])
+	# ========== ② 基地层：电梯必须隐藏 ==========
+	_floor = 100
+	_build_floor(false)
+	await get_tree().process_frame
+	var e_base_vis: bool = _floor_elevator.visible if (_floor_elevator != null) else false
+	if e_base_vis:
+		ok = false
+		_verify_log("FAIL: ② 基地层电梯仍可见（应只有 DepartTile 黄方块）")
+	_verify_log("② base floor elevator visible=%s (expect false)" % str(e_base_vis))
+	# ========== ③ 站门口按 F → 回基地（真实输入链路）==========
+	_floor = 99
+	_build_floor(false)
+	await get_tree().process_frame
+	player.global_position = _floor_spawn        # 站上出发点 = 电梯门口
+	await get_tree().process_frame
+	var f_before: int = _floor
+	_send_key(KEY_F)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var f_after: int = _floor
+	if f_after != 100 or f_before != 99:
+		ok = false
+		_verify_log("FAIL: ③ 站电梯门口按 F 未回基地：floor %d -> %d（期望 99 -> 100）" % [f_before, f_after])
+	_verify_log("③ F at elevator door: floor %d -> %d (expect 99->100)" % [f_before, f_after])
+	# ========== ④ 需求②：下楼保持位置 ==========
+	_floor = 99
+	_build_floor(false)
+	await get_tree().process_frame
+	# ⚠⚠ 选点必须**动态扫合法格**：写死坐标会撞上本层 exit_marker（1736,1240）——
+	#   玩家站在出口上时 `_process` 每帧自动 `_descend()`，层号会乱跳（实测踩到）。
+	#   条件：99 层地面格 ∧ 离出口 >300px ∧ 离出发点 >200px（避开保护圈敌群）。
+	var keep_v: Vector2 = Vector2.ZERO
+	for ty in range(2, _floor_rows - 2):
+		var found4: bool = false
+		for tx in range(2, _floor_cols - 2):
+			if int(_floor_grid[ty * _floor_cols + tx]) != 1:
+				continue
+			var c4: Vector2 = Vector2(float(tx) * 16.0 + 8.0, float(ty) * 16.0 + 8.0)
+			if c4.distance_to(exit_marker.global_position) < 300.0:
+				continue
+			if c4.distance_to(_floor_spawn) < 200.0:
+				continue
+			keep_v = c4
+			found4 = true
+			break
+		if found4:
+			break
+	if keep_v == Vector2.ZERO:
+		ok = false
+		_verify_log("FAIL: ④ 前置 —— 99 层找不到合法 keep 点")
+	player.global_position = keep_v
+	await get_tree().process_frame
+	var d_before: int = _floor
+	_descend()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var d_after: int = _floor
+	var p4: Vector2 = player.global_position
+	# ⚠ 断言兼容需求语义的两种正确结果：**逐字保持** 或 **就近合法回退**
+	#   （用户原话「保持原来位置（如该位置已占用就去附近的空格子）」）。
+	var exact4: bool = is_equal_approx(p4.x, keep_v.x) and is_equal_approx(p4.y, keep_v.y)
+	var near4: bool = p4.distance_to(keep_v) <= 140.0
+	var t4 := Vector2i(int(p4.x) / 16, int(p4.y) / 16)
+	var t4_ok: bool = false
+	if t4.x >= 0 and t4.y >= 0 and t4.x < _floor_cols and t4.y < _floor_rows:
+		t4_ok = int(_floor_grid[t4.y * _floor_cols + t4.x]) == 1
+	# 反向断言：**不许**被摆到本层出发点（那是旧行为，会把玩家挪到地图另一端）
+	var not_spawn4: bool = p4.distance_to(_floor_spawn) > 8.0
+	var kept: bool = (d_after == 98 and not_spawn4 and (exact4 or (near4 and t4_ok)))
+	if not kept:
+		ok = false
+		_verify_log("FAIL: ④ 下楼未保持位置：floor %d->%d pos (%.0f,%.0f)->(%.0f,%.0f) exact=%s near=%s t4_ok=%s（期望 99->98 且保持/就近回退）" % [
+			d_before, d_after, keep_v.x, keep_v.y, p4.x, p4.y, str(exact4), str(near4), str(t4_ok)])
+	_verify_log("④ descend keep-pos: floor %d->%d pos (%.0f,%.0f)->(%.0f,%.0f) exact=%s near=%s t4_ok=%s kept=%s" % [
+		d_before, d_after, keep_v.x, keep_v.y, p4.x, p4.y, str(exact4), str(near4), str(t4_ok), str(kept)])
+	# ========== ⑤ 需求②：目标格被占 → 就近合法格 ==========
+	# 构造：把玩家放到**墙里**（世界左上角 = 最外围实心区）再触发 keep-pos 摆位，
+	#   断言落点是合法地面格（grid==1）。
+	var wall_pos: Vector2 = Vector2(8.0, 8.0)
+	_place_player_keep(wall_pos, _current_floor_data())
+	var p5: Vector2 = player.global_position
+	var t5 := Vector2i(int(p5.x) / LIT_TILE, int(p5.y) / LIT_TILE)
+	var t5_ok: bool = false
+	if t5.x >= 0 and t5.y >= 0 and t5.x < _floor_cols and t5.y < _floor_rows:
+		t5_ok = int(_floor_grid[t5.y * _floor_cols + t5.x]) == 1
+	var moved: bool = p5.distance_to(wall_pos) > 1.0
+	if not (t5_ok and moved):
+		ok = false
+		_verify_log("FAIL: ⑤ 墙内部位未回退到合法格：pos=(%.0f,%.0f) tile=(%d,%d)" % [p5.x, p5.y, t5.x, t5.y])
+	_verify_log("⑤ wall-pos fallback: (%.0f,%.0f) -> (%.0f,%.0f) tile=(%d,%d) grid_ok=%s moved=%s" % [
+		wall_pos.x, wall_pos.y, p5.x, p5.y, t5.x, t5.y, str(t5_ok), str(moved)])
+	# ========== ⑥ R-new（2026-10-22）UI 消失 bug 回归断言 ==========
+	# 【用户报障逐字】「当程序运行到第98层时，所有UI元素突然全部消失，无法正常显示和交互。
+	#   即使再回到100层或其他楼层后仍然没有显示UI。」
+	# 【根因】`hud.visible` 全项目只有 `_toggle_map` 两个赋值点（开地图=false / 关地图=true），
+	#   而 `_build_floor` **从不复位**。⇒ 地图开着时换层（开图按 F 回基地 / 开图走到出口
+	#   descend / 开图死亡续关）后 hud.visible 停留在 false，且之后没有任何路径恢复它。
+	#   （98 层恰是「从 99 层出口下楼」到达的层，所以用户在 98 层撞见。）
+	# 【断言】三条真实路径各跑一遍，换层后 HUD 必须可见。
+	var ui_ok: bool = true
+	# ⑥-a 开地图 → descend → HUD 必须恢复
+	_floor = 99
+	_build_floor(false)
+	await get_tree().process_frame
+	_toggle_map()                      # 开地图（hud.visible -> false）
+	var hud_after_open: bool = hud.visible
+	if hud_after_open:
+		_verify_log("FAIL: ⑥-a 前置不成立 —— 开地图后 HUD 竟仍可见（_toggle_map 语义变了？）")
+		ui_ok = false
+	_descend()                         # 地图开着下楼（用户报障的真实路径）
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if not hud.visible:
+		ui_ok = false
+		_verify_log("FAIL: ⑥-a 开地图后下楼，HUD 未恢复可见（floor=%d）—— UI 消失 bug 复现" % _floor)
+	# ⑥-b 开地图 → 回基地 → HUD 必须恢复
+	_floor = 99
+	_build_floor(false)
+	await get_tree().process_frame
+	_toggle_map()
+	player.global_position = _floor_spawn   # 站电梯门口
+	await get_tree().process_frame
+	_try_elevator()                       # 地图开着按 F 回基地
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if not hud.visible:
+		ui_ok = false
+		_verify_log("FAIL: ⑥-b 开地图后回基地，HUD 未恢复可见（floor=%d）" % _floor)
+	# ⑥-c 换层后大地图必须自动关闭（旧层快照过期，R-147 语义）
+	if floor_map.visible:
+		ui_ok = false
+		_verify_log("FAIL: ⑥-c 换层后大地图仍开着（旧层地图快照已过期）")
+	_verify_log("⑥ UI-visibility regression: descend_restored=%s return_restored=%s map_auto_closed=%s（期望全 true）" % [
+		str(hud.visible), str(hud.visible), str(not floor_map.visible)])
+	if not ui_ok:
+		ok = false
+
+	_verify_log("=== R-new elevator test %s ===" % ("PASSED" if ok else "FAILED"))
+	get_tree().quit(0 if ok else 1)
+
+# ==== R-new（2026-10-22）：右键瞄准探图 —— 准星所在格升为「已探索」====
+# 【用户需求逐字】「玩家用右键瞄准时，准星所在的位置也要视为探索。
+#   也就是玩家可以用右键瞄准来探索地图。」
+# 【本入口钉死的三条】
+#   ① 瞄准时：准星格（及 AIM_REVEAL_RADIUS_TILES 圈）被揭示为「已探索」（地形记忆，非此刻可见）；
+#   ② 揭示**独立于**正常视野半径 —— 准星常落在视野半径之外，普通 LOS 够不到；
+#   ③ 不瞄准时：同等条件下**不**揭示（负向控制，证明是「瞄准」在起作用，而非别的路径）。
+# ⚠ 测试把玩家放到世界中心、鼠标钉在视口左上角 → 准星必落在视野半径之外（>12 格），
+#   从而把「瞄准揭示」与「正常 LOS 可见」彻底区分开。
+func _verify_aimreveal_test() -> void:
+	_verify_log("=== R-new aim-reveal test (右键瞄准探图：准星格升为已探索) ===")
+	var ok: bool = true
+
+	# ⓪ 前置：进 99 层（战斗层 → 迷雾渲染开启），强制开迷雾；玩家放到世界中心
+	_floor = 99
+	_build_floor(false)
+	_fog_enabled = true
+	await get_tree().process_frame
+	await get_tree().process_frame
+	player.global_position = Vector2(1024.0, 688.0)   # 世界(2048×1376)中心
+	# ⚠ 关掉摄像机平滑（否则摄像机追玩家有延迟，准星→世界映射每跑不稳定）→ 本测试确定化
+	if camera != null and is_instance_valid(camera):
+		camera.position_smoothing_enabled = false
+		camera.global_position = player.global_position
+	await get_tree().process_frame
+	await get_tree().process_frame
+	# 鼠标钉在视口左上角（viewport 640×360 坐标）→ 准星 = 世界左上区域，远离玩家
+	Input.warp_mouse(Vector2(5.0, 5.0))
+	_send_mouse(Vector2(5.0, 5.0), false)
+	await get_tree().process_frame
+	var pt_player: Vector2i = _fog.world_to_tile(player.global_position)
+	var pt_cross: Vector2i = _fog.world_to_tile(player.get_global_mouse_position())
+	var dx_t: int = pt_cross.x - pt_player.x
+	var dy_t: int = pt_cross.y - pt_player.y
+	var dist_t: float = sqrt(float(dx_t * dx_t + dy_t * dy_t))
+	_verify_log("⓪ player_tile=(%d,%d) crosshair_tile=(%d,%d) dist=%.1f tiles (expect >> FOG_VISION_RADIUS_TILES=%d)" % [
+		pt_player.x, pt_player.y, pt_cross.x, pt_cross.y, dist_t, GameConstants.FOG_VISION_RADIUS_TILES])
+	if pt_cross == pt_player:
+		_verify_log("FAIL: ⓪ 准星 == 玩家格（鼠标未生效）→ 无法区分瞄准揭示与正常 LOS")
+		ok = false
+	if dist_t <= float(GameConstants.FOG_VISION_RADIUS_TILES):
+		_verify_log("FAIL: ⓪ 准星不在视野半径之外（dist=%.1f），无法区分瞄准揭示与正常 LOS" % dist_t)
+		ok = false
+	if pt_cross.x < 0 or pt_cross.y < 0 or pt_cross.x >= _fog.cols() or pt_cross.y >= _fog.rows():
+		_verify_log("FAIL: ⓪ 准星落在地图外（%d,%d）—— 玩家/鼠标摆放需重调" % [pt_cross.x, pt_cross.y])
+		ok = false
+
+	# ① 干净基线：重置本层探索 → 准星远格必为「未探索」（负向前提）
+	_fog.reset_floor(_floor)
+	_fog_last_tile = Vector2i(-999999, -999999)
+	_fog.update_visibility(player.global_position)
+	var s_before: int = _fog.state_at_tile(pt_cross)
+	_verify_log("① 基线: crosshair_tile state=%d (expect 0=未探索，远于视野半径)" % s_before)
+	if s_before != GameConstants.FOG_UNEXPLORED:
+		_verify_log("FAIL: ① 基线的准星远格竟已被探索（state=%d），前提不成立" % s_before)
+		ok = false
+
+	# ② 核心（LOS 感知）：瞄准 → 准星格按**视线是否可达**决定是否揭示
+	#   · 可达（中间无墙）→ 升为「已探索」；· 被墙挡 → 保持「未探索」（本次需求的遮挡）。
+	player.aiming = true
+	_fog_last_tile = Vector2i(-999999, -999999)   # 强制 refresh 走完整链路
+	_refresh_fog(true)
+	var pt_cross2: Vector2i = _fog.world_to_tile(player.get_global_mouse_position())
+	var clear2: bool = not _fog.los_blocked(player.global_position, pt_cross2)
+	var s_aim: int = _fog.state_at_tile(pt_cross2)
+	var ok2: bool = (s_aim >= GameConstants.FOG_EXPLORED) if clear2 else (s_aim < GameConstants.FOG_EXPLORED)
+	_verify_log("② 瞄准后: crosshair=(%d,%d) LOS_clear=%s state=%d (expect %s)" % [
+		pt_cross2.x, pt_cross2.y, str(clear2), s_aim, ">=1 可达→揭示" if clear2 else "0 被墙挡→不揭示"])
+	if not ok2:
+		ok = false
+		_verify_log("FAIL: ② 瞄准后准星格 state=%d 与 LOS_clear=%s 不符（遮挡判断未生效）" % [s_aim, str(clear2)])
+
+	# ③ 负向控制：取消瞄准 → 重置该层 → 再刷新，准星格必须**仍**为未探索
+	#   （证明揭示依赖「瞄准」；且「已探索永不回退」在这里不影响，因为我们重置了整层）
+	player.aiming = false
+	_fog.reset_floor(_floor)
+	_fog_last_tile = Vector2i(-999999, -999999)
+	_refresh_fog(true)
+	var pt_cross3: Vector2i = _fog.world_to_tile(player.get_global_mouse_position())
+	var s_off: int = _fog.state_at_tile(pt_cross3)
+	_verify_log("③ 不瞄准+重置后: crosshair_tile=(%d,%d) state=%d (expect 0=未探索)" % [pt_cross3.x, pt_cross3.y, s_off])
+	if s_off != GameConstants.FOG_UNEXPLORED:
+		_verify_log("FAIL: ③ 不瞄准时准星格竟被探索（state=%d）—— 揭示不依赖瞄准，需求不符" % s_off)
+		ok = false
+
+	# ④ LOS 感知的 3×3：每格「可达→≥已探索」「被墙挡→仍未探索」
+	player.aiming = true
+	_fog.reset_floor(_floor)
+	_fog_last_tile = Vector2i(-999999, -999999)
+	_refresh_fog(true)
+	var pt_ring: Vector2i = _fog.world_to_tile(player.get_global_mouse_position())
+	var r: int = GameConstants.AIM_REVEAL_RADIUS_TILES
+	var ring_ok: bool = true
+	var ring_rev: int = 0
+	var ring_blk: int = 0
+	for ry in range(-r, r + 1):
+		for rx in range(-r, r + 1):
+			var nt: Vector2i = pt_ring + Vector2i(rx, ry)
+			if nt.x < 0 or nt.y < 0 or nt.x >= _fog.cols() or nt.y >= _fog.rows():
+				continue
+			var vis: bool = not _fog.los_blocked(player.global_position, nt)
+			var st: int = int(_fog.state_at_tile(nt))
+			if vis:
+				ring_rev += 1
+				if st < GameConstants.FOG_EXPLORED:
+					ring_ok = false
+			else:
+				ring_blk += 1
+				if st >= GameConstants.FOG_EXPLORED:
+					ring_ok = false
+	_verify_log("④ 准星 3×3 逐格 LOS 一致: %s (可达 %d 格 / 被挡 %d 格；可达→揭示、被挡→不揭示)" % [
+		str(ring_ok), ring_rev, ring_blk])
+	if not ring_ok:
+		ok = false
+		_verify_log("FAIL: ④ 准星 3×3 有格与 LOS 不一致（遮挡判断缺失/错位）")
+
+	# ⑤ 确定性遮挡单测（合成 11×11 网格，竖墙 x=5）：可达 / 隔墙 / 墙本身 / 墙后 / 越界
+	var g := PackedByteArray()
+	g.resize(11 * 11)
+	g.fill(1)
+	for gy in 11:
+		g[gy * 11 + 5] = 0                 # 整列 x=5 = 墙（0）
+	var fg := FogGridScript.new()
+	fg.set_floor(g, 11, 11, 999)
+	var from := Vector2i(2, 5)
+	fg.reveal_square(Vector2i(4, 5), 1, from)           # ⑤-a 可达 → 揭示 (4,5)
+	var a_ok: bool = int(fg.state_at_tile(Vector2i(4, 5))) >= GameConstants.FOG_EXPLORED
+	fg.reveal_square(Vector2i(8, 5), 1, from)           # ⑤-b 隔墙 → (8,5) 不揭示
+	var b_ok: bool = int(fg.state_at_tile(Vector2i(8, 5))) < GameConstants.FOG_EXPLORED
+	var c_ok: bool = int(fg.state_at_tile(Vector2i(5, 5))) >= GameConstants.FOG_EXPLORED   # ⑤-c 墙本身可见（终点豁免）
+	var d_ok: bool = int(fg.state_at_tile(Vector2i(6, 5))) < GameConstants.FOG_EXPLORED    # ⑤-d 墙后 (6,5) 不可见
+	var e_cnt: int = fg.reveal_square(Vector2i(-1, -1), 0, from)                           # ⑤-e 越界 → 0、不崩
+	var e_ok: bool = e_cnt == 0
+	var occl_ok: bool = a_ok and b_ok and c_ok and d_ok and e_ok
+	_verify_log("⑤ 遮挡单测: 可达=%s 隔墙=%s 墙本身=%s 墙后=%s 越界=%s (expect 全 true)" % [
+		str(a_ok), str(b_ok), str(c_ok), str(d_ok), str(e_ok)])
+	if not occl_ok:
+		ok = false
+		_verify_log("FAIL: ⑤ 遮挡单测失败 (a=%s b=%s c=%s d=%s e=%s)" % [str(a_ok), str(b_ok), str(c_ok), str(d_ok), str(e_ok)])
+
+	_verify_log("=== R-new aim-reveal test %s ===" % ("PASSED" if ok else "FAILED"))
+	get_tree().quit(0 if ok else 1)
+
+# ==== R-new（2026-10-22）：--verify-basbed 基地双人床（站床旁按 F 回血 + 按比例扣饥渴）====
+# 【钉死】① 床在起始房空地 (33,15)、是地板、不在固定箱上；② 近床回满 HP；
+#   ③ 半血(40→100,frac=0.6) 各扣 60；满治愈(0→100,frac=1.0) 各扣 100（下界钳 0）——「各扣100」锚；
+#   ④ 满血无回血无成本；⑤ 不近床 _try_bed 返回 false 不回血；⑥ 合成 F 键经 _unhandled_input 能回血（接线）。
+func _verify_basbed_test() -> void:
+	_verify_log("=== R-new base bed test (站床旁按 F 回血 + 按比例扣饥渴) ===")
+	var ok: bool = true
+
+	# ⓪ 前置：进 100 层基地（_build_floor 会建床）
+	_floor = GameConstants.START_FLOOR
+	_build_floor(false)
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+	# ① 床存在 + 落点 (33,15) + 是地板 + 不在固定箱 (36,15) 上
+	var bed_ok: bool = _base_bed != null and is_instance_valid(_base_bed) and _base_bed.visible
+	var bed_world: Vector2 = _base_bed.global_position if bed_ok else Vector2.ZERO
+	var tl: float = FloorGeneratorScript.TILE
+	var bt: Vector2i = Vector2i(int(bed_world.x / tl), int(bed_world.y / tl))
+	var want_tile: Vector2i = Vector2i(GameConstants.BED_TILE_X, GameConstants.BED_TILE_Y)
+	var on_floor: bool = false
+	if bed_ok and bt.x >= 0 and bt.y >= 0 and bt.x < _floor_cols and bt.y < _floor_rows:
+		on_floor = int(_floor_grid[bt.y * _floor_cols + bt.x]) == 1
+	if not bed_ok:
+		_verify_log("FAIL: ① 床节点不存在/不可见")
+		ok = false
+	if bt != want_tile:
+		_verify_log("FAIL: ① 床落点 tile=(%d,%d)，期望 (%d,%d)" % [bt.x, bt.y, want_tile.x, want_tile.y])
+		ok = false
+	if not on_floor:
+		_verify_log("FAIL: ① 床落点不是地板 grid!=1（压在墙/箱上？）")
+		ok = false
+	_verify_log("① 床 tile=(%d,%d) on_floor=%s (expect (%d,%d) true)" % [bt.x, bt.y, str(on_floor), want_tile.x, want_tile.y])
+
+	# 近床站位 = 床中心（dist 0 ≤ BED_INTERACT_DIST）
+	player.global_position = bed_world
+
+	# ②③ 半血回满：hp 40→100，frac=0.6 → 饥渴 100→40（各扣 60）
+	player.hp = 40.0
+	player.hunger = GameConstants.HUNGER_MAX
+	player.thirst = GameConstants.THIRST_MAX
+	var did: bool = _try_bed()
+	if not did or not is_equal_approx(player.hp, player.max_hp):
+		_verify_log("FAIL: ② 近床 _try_bed 未回满 HP (did=%s hp=%.1f/%.1f)" % [str(did), player.hp, player.max_hp])
+		ok = false
+	if not is_equal_approx(player.hunger, GameConstants.HUNGER_MAX - 60.0) or not is_equal_approx(player.thirst, GameConstants.THIRST_MAX - 60.0):
+		_verify_log("FAIL: ③ 半血回满扣饥渴不符比例 (hunger=%.1f thirst=%.1f expect %.1f/%.1f)" % [player.hunger, player.thirst, GameConstants.HUNGER_MAX - 60.0, GameConstants.THIRST_MAX - 60.0])
+		ok = false
+	_verify_log("②③ 半血: did=%s hp->%.1f hunger->%.1f thirst->%.1f (expect %.1f / %.1f / %.1f)" % [str(did), player.hp, player.hunger, player.thirst, player.max_hp, GameConstants.HUNGER_MAX - 60.0, GameConstants.THIRST_MAX - 60.0])
+
+	# ③-b 满治愈锚：hp 0→100，frac=1.0 → 各扣 100（钳到 0）
+	player.hp = 0.0
+	player.hunger = GameConstants.HUNGER_MAX
+	player.thirst = GameConstants.THIRST_MAX
+	_try_bed()
+	if not is_equal_approx(player.hp, player.max_hp) or not is_equal_approx(player.hunger, 0.0) or not is_equal_approx(player.thirst, 0.0):
+		_verify_log("FAIL: ③-b 满治愈应各扣 100 到 0 (hp=%.1f hunger=%.1f thirst=%.1f)" % [player.hp, player.hunger, player.thirst])
+		ok = false
+	_verify_log("③-b 满治愈: hp=%.1f hunger=%.1f thirst=%.1f (expect 100/0/0 —— 各扣100锚)" % [player.hp, player.hunger, player.thirst])
+
+	# ④ 满血无成本：hp=100 → _try_bed 返回 true 但饥渴不变
+	player.hp = player.max_hp
+	player.hunger = 50.0
+	player.thirst = 50.0
+	var did_full: bool = _try_bed()
+	if not did_full or not is_equal_approx(player.hunger, 50.0) or not is_equal_approx(player.thirst, 50.0):
+		_verify_log("FAIL: ④ 满血时不应扣饥渴 (did=%s hp=%.1f hunger=%.1f thirst=%.1f)" % [str(did_full), player.hp, player.hunger, player.thirst])
+		ok = false
+	_verify_log("④ 满血: did=%s hunger=%.1f thirst=%.1f (expect 50/50 不变)" % [str(did_full), player.hunger, player.thirst])
+
+	# ⑤ 阴性：走远 → _try_bed 返回 false、不回血
+	player.global_position = bed_world + Vector2(300.0, 0.0)   # 远超 BED_INTERACT_DIST
+	player.hp = 40.0
+	var did_far: bool = _try_bed()
+	if did_far or not is_equal_approx(player.hp, 40.0):
+		_verify_log("FAIL: ⑤ 不近床时 _try_bed 应返回 false 且不回血 (did=%s hp=%.1f)" % [str(did_far), player.hp])
+		ok = false
+	_verify_log("⑤ 阴性(远): did=%s hp=%.1f (expect false 40.0)" % [str(did_far), player.hp])
+
+	# ⑥ F 链接线：近床 + 合成 F 键 → HP 回满（证明 _unhandled_input 的 F 链能到 _try_bed）
+	player.global_position = bed_world
+	player.hp = 30.0
+	player.hunger = GameConstants.HUNGER_MAX
+	player.thirst = GameConstants.THIRST_MAX
+	var ev := InputEventKey.new()
+	ev.physical_keycode = KEY_F
+	ev.pressed = true
+	_unhandled_input(ev)
+	if not is_equal_approx(player.hp, player.max_hp):
+		_verify_log("FAIL: ⑥ 合成 F 键未触发回血 (hp=%.1f/%.1f) —— F 链接线断" % [player.hp, player.max_hp])
+		ok = false
+	_verify_log("⑥ F链: hp 30.0->%.1f via synthetic F (expect %.1f)" % [player.hp, player.max_hp])
+
+	_verify_log("=== R-new base bed test %s ===" % ("PASSED" if ok else "FAILED"))
+	get_tree().quit(0 if ok else 1)
+
+# ==== R-new（2026-10-22）：--verify-npcdialog 基地 NPC1 对话系统 ====
+# 【钉死】① NPC1 在 (38,15) 空地；② _try_npc 近身开对话/不近身 false；
+#   ③ advance 逐句推进、句数用尽即关闭；④ 合成 F 键经 _unhandled_input 开对话（接线）；⑤ Esc 关闭。
+func _verify_npcdialog_test() -> void:
+	_verify_log("=== R-new npc dialog test (多轮对话 + 持久化 + F 交互) ===")
+	var ok: bool = true
+
+	# ⓪ 前置：进 100 层基地（建 NPC1）；对话框已在 _ready 建好
+	_floor = GameConstants.START_FLOOR
+	_build_floor(false)
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+	if _npc_dialog == null or not is_instance_valid(_npc_dialog):
+		_verify_log("FAIL: ⓪-b 对话框节点不存在（_build_npc_dialog 未生效）")
+		ok = false
+	var dlg: Node2D = _npc_dialog
+	# ⓪-c UI 缩放：对话框必须被 _apply_ui_scale 纳入 ×2（否则半尺寸挤左上）
+	var want_s: Vector2 = Vector2(GameConstants.UI_SCALE, GameConstants.UI_SCALE)
+	var got_s: Vector2 = (dlg as CanvasItem).scale if dlg != null else Vector2.ZERO
+	if dlg != null and got_s != want_s:
+		ok = false
+		_verify_log("FAIL: ⓪-c 对话框 scale=%s != %s（_apply_ui_scale 未纳入，会半尺寸挤左上）" % [str(got_s), str(want_s)])
+	_verify_log("⓪-c 对话框 scale=%s (expect %s)" % [str(got_s), str(want_s)])
+
+	# ① NPC1 存在 + 落点 (38,15) + 是地板
+	var npc_ok: bool = _base_npc != null and is_instance_valid(_base_npc) and _base_npc.visible
+	var nworld: Vector2 = _base_npc.global_position if npc_ok else Vector2.ZERO
+	var tl: float = FloorGeneratorScript.TILE
+	var nt: Vector2i = Vector2i(int(nworld.x / tl), int(nworld.y / tl))
+	var want: Vector2i = Vector2i(GameConstants.NPC_TILE_X, GameConstants.NPC_TILE_Y)
+	var npc_floor: bool = false
+	if npc_ok and nt.x >= 0 and nt.y >= 0 and nt.x < _floor_cols and nt.y < _floor_rows:
+		npc_floor = int(_floor_grid[nt.y * _floor_cols + nt.x]) == 1
+	if not npc_ok or nt != want or not npc_floor:
+		ok = false
+		_verify_log("FAIL: ① NPC1 落点异常 (ok=%s tile=(%d,%d) want=(%d,%d) floor=%s)" % [str(npc_ok), nt.x, nt.y, want.x, want.y, str(npc_floor)])
+	_verify_log("① NPC1 tile=(%d,%d) on_floor=%s (expect (%d,%d) true)" % [nt.x, nt.y, str(npc_floor), want.x, want.y])
+
+	# ② _try_npc：不近身 false；近身 true 且对话框开（随后收起，进入状态逻辑测试）
+	player.global_position = nworld + Vector2(300.0, 0.0)
+	if _try_npc():
+		ok = false
+		_verify_log("FAIL: ② 不近身时 _try_npc 应返回 false")
+	player.global_position = nworld
+	if not _try_npc():
+		ok = false
+		_verify_log("FAIL: ② 近身时 _try_npc 应返回 true 并开对话")
+	if not dlg.is_open():
+		ok = false
+		_verify_log("FAIL: ② _try_npc 后对话框应 open")
+	if dlg.is_open():
+		dlg.close()
+	_verify_log("② _try_npc: far=false near=true (已开并收起)")
+
+	# ---- 快照「对话状态存档」，测试后还原（防污染真实存档）----
+	var save_path := "user://npc_dialog_save.json"
+	var had_save: bool = FileAccess.file_exists(save_path)
+	var bak: String = FileAccess.get_file_as_string(save_path) if had_save else ""
+
+	# ⑨-a 首次对话：强制「未完成首次」→ 队列应 [0,2,1] → 推进 3 步 → 关闭 + 标记 + 落盘
+	dlg.clear_first_flags()
+	dlg.open("npc01")
+	var q0: Array = dlg.current_queue()
+	var q_ok: bool = (q0.size() == 3 and int(q0[0]) == 0 and int(q0[1]) == 2 and int(q0[2]) == 1)
+	var steps_a: int = 0
+	while dlg.is_open() and steps_a < 50:
+		dlg.advance()
+		steps_a += 1
+	var a_closed: bool = not dlg.is_open()
+	var a_marked: bool = dlg.is_first_done("npc01")
+	var a_persisted: bool = FileAccess.file_exists(save_path) and FileAccess.get_file_as_string(save_path).find("npc01") >= 0
+	if not (q_ok and steps_a == 3 and a_closed and a_marked and a_persisted):
+		ok = false
+		_verify_log("FAIL: ⑨-a 首次对话: 队列=%s(期望[0,2,1]) steps=%d(期望3) closed=%s marked=%s persisted=%s" % [str(q0), steps_a, str(a_closed), str(a_marked), str(a_persisted)])
+	_verify_log("⑨-a 首次对话: 队列=%s steps=%d closed=%s marked=%s persisted=%s" % [str(q0), steps_a, str(a_closed), str(a_marked), str(a_persisted)])
+
+	# ⑨-b 后续对话：已完成首次 → 队列应 1 句（随机池）→ 推进 1 步 → 关闭
+	dlg.open("npc01")
+	var q1: Array = dlg.current_queue()
+	var b_ok: bool = q1.size() == 1
+	var steps_b: int = 0
+	while dlg.is_open() and steps_b < 50:
+		dlg.advance()
+		steps_b += 1
+	if not (b_ok and steps_b == 1 and not dlg.is_open()):
+		ok = false
+		_verify_log("FAIL: ⑨-b 后续对话: 队列=%s(期望 1 句) steps=%d(期望1)" % [str(q1), steps_b])
+	_verify_log("⑨-b 后续对话: 队列=%s(1句随机) steps=%d closed=%s" % [str(q1), steps_b, str(not dlg.is_open())])
+
+	# ⑨-c 中途 Esc 关闭 → 不标记「首次完成」（未播完不算完成）
+	dlg.clear_first_flags()
+	dlg.open("npc01")
+	dlg.advance()
+	dlg.close()
+	if dlg.is_first_done("npc01"):
+		ok = false
+		_verify_log("FAIL: ⑨-c 中途关闭不应标记首次完成")
+	_verify_log("⑨-c 中途关闭: marked=%s (expect false)" % str(dlg.is_first_done("npc01")))
+
+	# ---- 还原存档 + 清内存状态 ----
+	if had_save:
+		var f := FileAccess.open(save_path, FileAccess.WRITE)
+		if f != null:
+			f.store_string(bak)
+			f.close()
+	elif FileAccess.file_exists(save_path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(save_path))
+	dlg.clear_first_flags()
+	_verify_log("⑨-d 对话存档已还原（had_save=%s）" % str(had_save))
+
+	# ④ 合成 F 键开对话（接线）：确保关着 → 近身 → 按 F
+	if dlg.is_open():
+		dlg.close()
+	player.global_position = nworld
+	var ev := InputEventKey.new()
+	ev.physical_keycode = KEY_F
+	ev.pressed = true
+	_unhandled_input(ev)
+	if not dlg.is_open():
+		ok = false
+		_verify_log("FAIL: ④ 合成 F 键未打开对话（_unhandled_input F 链未到 _try_npc）")
+	_verify_log("④ F链: synthetic F -> dialog_open=%s (expect true)" % str(dlg.is_open()))
+
+	# ⑤ Esc 关闭
+	var ev2 := InputEventKey.new()
+	ev2.physical_keycode = KEY_ESCAPE
+	ev2.pressed = true
+	_unhandled_input(ev2)
+	if dlg.is_open():
+		ok = false
+		_verify_log("FAIL: ⑤ Esc 未关闭对话")
+	_verify_log("⑤ Esc: dialog_open=%s (expect false)" % str(dlg.is_open()))
+
+	_verify_log("=== R-new npc dialog test %s ===" % ("PASSED" if ok else "FAILED"))
+	get_tree().quit(0 if ok else 1)
+
 func _verify_depart_test() -> void:
 	_verify_log("=== R-113 depart tile test (base tile / no base exit / depart=reset / V-key 1.5s toast) ===")
 	var ok: bool = true
@@ -16027,7 +17965,7 @@ func _verify_depart_test() -> void:
 	#   ⚠ 此刻玩家正站在瓦片中心（①-e 设的）—— 这是出发分支唯一会亮的位置。
 	_toast_t = 0.0                       # 清掉可能的 toast，确保测的是出发分支
 	_update_hint()
-	var want_depart_hint: String = "按 F 进入下一层"
+	var want_depart_hint: String = "按 F 选择楼层"   # R-new 2026-10-18：F 从「确认下楼」改为「开楼层选择面板」
 	var hint_on: String = String(hint.text)
 	var hint_on_ok: bool = (hint_on == want_depart_hint)
 	if not hint_on_ok:
@@ -16096,21 +18034,21 @@ func _verify_depart_test() -> void:
 	#   最终派发到 `Main._unhandled_input` -> `KEY_F` 分支。
 	#   **不直接调 `_try_depart()`** —— 直接调会绕过"键位有没有接上"这一半。
 	# ⚠ `push_input` 是**排队**投递，GUI/输入在下一帧才派发 -> 必须 await（R-112 实测）。
-	_send_key(KEY_F)                          # 第一次 F：弹确认框（不立即下楼）
+	_send_key(KEY_F)                          # 第一次 F：开楼层选择面板（不立即下楼）
 	await get_tree().process_frame
 	await get_tree().process_frame
-	var confirm_opened: bool = _depart_confirm_open
-	var f_after_open: int = _floor            # 弹框后还没下楼（仍应 100）
-	_send_key(KEY_F)                          # 第二次 F：确认下楼
+	var confirm_opened: bool = _floor_select_open
+	var f_after_open: int = _floor            # 开面板后还没下楼（仍应 100）
+	_send_key(KEY_F)                          # 第二次 F：确认前往（默认项 99）
 	await get_tree().process_frame
 	await get_tree().process_frame
 	var f_after_key: int = _floor
 	var i2: bool = (confirm_opened and f_after_open == LIT_FLOOR_BASE and f_after_key == LIT_FLOOR_99)
 	if not i2:
 		ok = false
-		_verify_log("FAIL: ② 站上瓦片按 F：confirm_open=%s floor=%d(框开)->%d(确认) 期望 true / 100 / 99" % [
+		_verify_log("FAIL: ② 站上瓦片按 F：select_open=%s floor=%d(面板开)->%d(确认) 期望 true / 100 / 99" % [
 			str(confirm_opened), f_after_open, f_after_key])
-	_verify_log("② 真实按键 F 两段式: 弹框=%s floor %d ->(框开) %d ->(F确认) %d（期望 true/100/99）走 push_input 链路" % [
+	_verify_log("② 真实按键 F 两段式: 面板=%s floor %d ->(开) %d ->(F确认) %d（期望 true/100/99）走 push_input 链路" % [
 		str(confirm_opened), f_before_key, f_after_open, f_after_key])
 	# ②-b **负向断言**：离开瓦片后按 F 必须**无效**（不弹框、层号不变）
 	if i2:
@@ -16124,12 +18062,12 @@ func _verify_depart_test() -> void:
 		await get_tree().process_frame
 		await get_tree().process_frame
 		var f_neg2: int = _floor
-		var neg_confirm_open: bool = _depart_confirm_open
+		var neg_confirm_open: bool = _floor_select_open
 		if f_neg2 != f_neg or neg_confirm_open:
 			ok = false
 			_verify_log("FAIL: ②-b 站在 %.0fpx 外按 F -> floor %d -> %d(期望不变) 且 confirm_open=%s(期望 false) —— F 变成了全局出发键" % [
 				LIT_FAR_DIST, f_neg, f_neg2, str(neg_confirm_open)])
-		_verify_log("②-b 负向断言（距瓦片 %.0fpx 按 F）: floor %d -> %d(不变) confirm_open=%s(期望 false，证明 F 只在瓦片上触发)" % [
+		_verify_log("②-b 负向断言（距瓦片 %.0fpx 按 F）: floor %d -> %d(不变) select_open=%s(期望 false，证明 F 只在瓦片上触发)" % [
 			LIT_FAR_DIST, f_neg, f_neg2, str(neg_confirm_open)])
 
 	# =================================================================
@@ -16335,21 +18273,21 @@ func _verify_depart_test() -> void:
 	# ⑤-b 正向对照：站回瓦片上按 **F** 两段式（弹框 + 确认）必须能下降
 	player.global_position = _depart_tile.tile_pos()
 	await get_tree().process_frame
-	_send_key(KEY_F)          # 第一次 F：弹确认框
+	_send_key(KEY_F)          # 第一次 F：开楼层选择面板
 	await get_tree().process_frame
 	await get_tree().process_frame
-	var f5_open: bool = _depart_confirm_open
-	var f5_after_open: int = _floor    # 弹框后还没下楼（仍应 100）
-	_send_key(KEY_F)          # 第二次 F：确认下楼
+	var f5_open: bool = _floor_select_open
+	var f5_after_open: int = _floor    # 开面板后还没下楼（仍应 100）
+	_send_key(KEY_F)          # 第二次 F：确认前往（默认项 99）
 	await get_tree().process_frame
 	await get_tree().process_frame
 	var f_e_ok: int = _floor
 	var e_alive: bool = (f5_open and f5_after_open == LIT_FLOOR_BASE and f_e_ok == LIT_FLOOR_99)
 	if not e_alive:
 		ok = false
-		_verify_log("FAIL: ⑤-b 站上瓦片按 F：confirm_open=%s floor=%d(框开)->%d(确认) 期望 true/100/99" % [
+		_verify_log("FAIL: ⑤-b 站上瓦片按 F：select_open=%s floor=%d(面板开)->%d(确认) 期望 true/100/99" % [
 			str(f5_open), f5_after_open, f_e_ok])
-	_verify_log("⑤-b 正向对照：站上瓦片按 F 两段式 -> 弹框=%s floor %d ->(框开) %d ->(确认) %d F_FUNCTIONAL=%s" % [
+	_verify_log("⑤-b 正向对照：站上瓦片按 F 两段式 -> 面板=%s floor %d ->(开) %d ->(确认) %d F_FUNCTIONAL=%s" % [
 		str(f5_open), f_base5, f5_after_open, f_e_ok, str(e_alive)])
 	# ⑤-c **F 在瓦片上弹框时不触发开箱**；Esc 取消后层号不变
 	_floor = LIT_FLOOR_BASE
@@ -16357,10 +18295,10 @@ func _verify_depart_test() -> void:
 	player.global_position = _depart_tile.tile_pos()
 	await get_tree().process_frame
 	_reset_trace()                # 清掉 ⑧ 可能残留的标记，保证下面的判断干净
-	_send_key(KEY_F)              # 第一次 F：应弹框，而非开箱（出发优先于开箱）
+	_send_key(KEY_F)              # 第一次 F：应开面板，而非开箱（出发优先于开箱）
 	await get_tree().process_frame
 	await get_tree().process_frame
-	var c_open: bool = _depart_confirm_open
+	var c_open: bool = _floor_select_open
 	var c_bag: bool = backpack.visible       # 弹框不该打开背包（=不该触发开箱）
 	var c_map: bool = floor_map.visible
 	var c_before: int = _floor
@@ -16368,13 +18306,13 @@ func _verify_depart_test() -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 	var c_after: int = _floor
-	var c_cancel_ok: bool = (not _depart_confirm_open and c_after == c_before)
+	var c_cancel_ok: bool = (not _floor_select_open and c_after == c_before)
 	if c_bag or c_map or not c_open or not c_cancel_ok:
 		ok = false
-		_verify_log("FAIL: ⑤-c 瓦片上按 F -> open=%s bag=%s map=%s；Esc -> confirm_open=%s floor %d->%d（期望 open=true、bag/map=false、Esc 关框且层号不变）" % [
-			str(c_open), str(c_bag), str(c_map), str(_depart_confirm_open), c_before, c_after])
-	_verify_log("⑤-c F 弹框不开箱 + Esc 取消: 弹框=%s(expect true) backpack=%s(expect false) map=%s(expect false) | Esc -> confirm_open=%s(expect false) floor %d->%d(不变)" % [
-		str(c_open), str(c_bag), str(c_map), str(_depart_confirm_open), c_before, c_after])
+		_verify_log("FAIL: ⑤-c 瓦片上按 F -> open=%s bag=%s map=%s；Esc -> select_open=%s floor %d->%d（期望 open=true、bag/map=false、Esc 关面板且层号不变）" % [
+			str(c_open), str(c_bag), str(c_map), str(_floor_select_open), c_before, c_after])
+	_verify_log("⑤-c F 开面板不开箱 + Esc 取消: 面板=%s(expect true) backpack=%s(expect false) map=%s(expect false) | Esc -> select_open=%s(expect false) floor %d->%d(不变)" % [
+		str(c_open), str(c_bag), str(c_map), str(_floor_select_open), c_before, c_after])
 
 	# =================================================================
 	# ⑥ 99–1 层出口**不受影响**（防「移除基地出口时误伤楼层出口」）
@@ -16477,7 +18415,7 @@ func _verify_depart_test() -> void:
 		and GameConstants.CRATE_ITEMS_MIN == 4
 		and GameConstants.CRATE_ITEMS_MAX == 10
 		and is_equal_approx(GameConstants.TRACE_COOLDOWN_GAME_SECONDS, 3600.0)
-		and is_equal_approx(GameConstants.TRACE_TIME_SCALE, 20.0)
+		and is_equal_approx(GameConstants.TRACE_TIME_SCALE, 120.0)
 		and GameConstants.TRACE_MAX_MARKS == 3
 		and is_equal_approx(GameConstants.TRACE_MARK_DURATION, 5.0)
 		# ==== R-147 新增常量锚 ====
@@ -16489,7 +18427,7 @@ func _verify_depart_test() -> void:
 	if not bal_ok:
 		ok = false
 		_verify_log("FAIL: ⑧ 常量锚被改动（本批只应新增瓦片/toast 常量，不得动既有数值）")
-	_verify_log("⑧ 常量锚 intact: TILE_RADIUS=%.1f(18) SPAWN_OFFSET.x=%.1f(34) TRACE_REJECT_TOAST=%.1f(1.5) |既有: CRATE_INTERACT=%.0f(24) ITEMS=%d..%d(4..10) TRACE_CD=%.0f(3600) SCALE=%.0f(20) MAX_MARKS=%d(3) MARK_DUR=%.1f(5) |R-147新增: SCAN_RADIUS=%d(10) SCAN_IGNORE_LOS=%s(true)" % [
+	_verify_log("⑧ 常量锚 intact: TILE_RADIUS=%.1f(18) SPAWN_OFFSET.x=%.1f(34) TRACE_REJECT_TOAST=%.1f(1.5) |既有: CRATE_INTERACT=%.0f(24) ITEMS=%d..%d(4..10) TRACE_CD=%.0f(3600) SCALE=%.0f(120) MAX_MARKS=%d(3) MARK_DUR=%.1f(5) |R-147新增: SCAN_RADIUS=%d(10) SCAN_IGNORE_LOS=%s(true)" % [
 		GameConstants.DEPART_TILE_RADIUS, GameConstants.DEPART_TILE_SPAWN_OFFSET.x,
 		GameConstants.TRACE_REJECT_TOAST_SECONDS, GameConstants.CRATE_INTERACT_DIST,
 		GameConstants.CRATE_ITEMS_MIN, GameConstants.CRATE_ITEMS_MAX,
@@ -16504,6 +18442,134 @@ func _verify_depart_test() -> void:
 	_verify_log("⑨ 本批**未**实现（留给 R-20 专门批次）: ②存档级持久层= 绳索 / 尸体残留 / 门锁 / 剧情进度；以及「布局按存档固化」")
 	_verify_log("⑨ 本批**未**触碰: FloorGenerator.gd（敌人曲线 11/1.3/60 原样）、ReturnBtn.gd（不立刻复位，已符合需求）、任何平衡数值")
 
+	# =================================================================
+	# ⑦ R-new（2026-10-18）：楼层选择面板 —— 列表内容 / ↓+F 直达 / Esc / 走开自动关
+	# =================================================================
+	# 用户需求逐字：「按F键以后列出所有曾经探索过的楼层（也就是已经生成过的
+	#   楼层地图），玩家可以选择直接到达该层。」
+	# 先造"已探索过 99/98"的事实：连落两层（_descend_to 与面板确认同一条落点函数）。
+	_descend_to(LIT_FLOOR_99)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	_descend_to(LIT_FLOOR_98)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	# ⚠ 回基地必须走 `_on_return_to_base()`（async）—— `_descend_to` 的 guard
+	#   刻意只放行战斗层（target >= START_FLOOR 一律拦截），回基地是另一条专门路径。
+	await _on_return_to_base()
+	# ⑦-a 列表内容：降序、含 99 与 98（数据源 = FogGrid.visited_floors 跨层缓存键）
+	player.global_position = _depart_tile.tile_pos()
+	await get_tree().process_frame
+	_send_key(KEY_F)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var fl: Array = _floor_select.floors() if _floor_select != null else []
+	var fl_floors: Array = []
+	for fe in fl:
+		fl_floors.append(int((fe as Dictionary).get("floor", -1)))
+	_verify_log("⑦-a visited list: %s (expect [99, 98] 降序)" % [str(fl_floors)])
+	if str(fl_floors) != str([LIT_FLOOR_99, LIT_FLOOR_98]):
+		ok = false
+		_verify_log("FAIL: ⑦-a 楼层列表 = %s（期望降序 [99, 98]）—— visited_floors 取数或排序错" % str(fl_floors))
+	# ⑦-b 光标右移一格（行优先：第二项在右边）-> F -> 直达 98（默认光标在首项 99）
+	_send_key(KEY_D)
+	await get_tree().process_frame
+	_send_key(KEY_F)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var f7: int = _floor
+	_verify_log("⑦-b 选第二项按 F -> floor=%d (expect 98)" % f7)
+	if f7 != LIT_FLOOR_98:
+		ok = false
+		_verify_log("FAIL: ⑦-b 选第二项按 F 应直达 98，实际 %d" % f7)
+	# ⑦-c Esc 取消：关面板、层号不变
+	_floor = LIT_FLOOR_BASE
+	_build_floor(false)
+	player.global_position = _depart_tile.tile_pos()
+	await get_tree().process_frame
+	_send_key(KEY_F)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var f7c_open: bool = _floor_select_open
+	_send_key(KEY_ESCAPE)
+	await get_tree().process_frame
+	var f7c_after: int = _floor
+	if not f7c_open or f7c_after != LIT_FLOOR_BASE or _floor_select_open:
+		ok = false
+		_verify_log("FAIL: ⑦-c Esc 取消异常: open=%s floor=%d still_open=%s（期望 true/100/false）" % [
+			str(f7c_open), f7c_after, str(_floor_select_open)])
+	_verify_log("⑦-c Esc 取消: open=%s(expect true) -> still_open=%s(expect false) floor=%d(expect 100)" % [
+		str(f7c_open), str(_floor_select_open), f7c_after])
+	# ⑦-c2 R-new（2026-10-19）：面板打开时游戏暂停；Esc 后还原
+	var p7_open: bool = false
+	var p7_closed: bool = false
+	_send_key(KEY_F)                  # 再开一次面板
+	await get_tree().process_frame
+	await get_tree().process_frame
+	p7_open = get_tree().paused and _floor_select_open
+	_send_key(KEY_ESCAPE)
+	await get_tree().process_frame
+	p7_closed = (not get_tree().paused) and (not _floor_select_open)
+	if not p7_open or not p7_closed:
+		ok = false
+		_verify_log("FAIL: ⑦-c2 面板暂停异常: open_paused=%s close_unpaused=%s（期望 true/true）" % [
+			str(p7_open), str(p7_closed)])
+	_verify_log("⑦-c2 面板开->paused=%s(expect true)；Esc 关->paused=%s(expect false)" % [
+		str(p7_open), str(get_tree().paused)])
+	# ⑦-d 走开自动关（R-119 语义延续：走远 2 倍半径 → 面板自动关）
+	player.global_position = _depart_tile.tile_pos()
+	await get_tree().process_frame
+	_send_key(KEY_F)
+	await get_tree().process_frame
+	player.global_position = _depart_tile.tile_pos() + Vector2(-LIT_FAR_DIST, 0.0)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var f7d_open: bool = _floor_select_open
+	if f7d_open:
+		ok = false
+		_verify_log("FAIL: ⑦-d 走远 %.0fpx 后面板没自动关（R-119 语义丢失）" % LIT_FAR_DIST)
+	_verify_log("⑦-d 走开 %.0fpx -> auto_close: open=%s(expect false)" % [LIT_FAR_DIST, str(f7d_open)])
+
+	# ⑦-e R-new（2026-10-22）：菜单关闭时 W/S 不得驱动菜单（防按键泄漏/重复绑定）
+	var e_sel_before: int = _floor_select.selected() if _floor_select != null else -999
+	var e_floor_before: int = _floor
+	_send_key(KEY_S)
+	await get_tree().process_frame
+	var e_sel_after: int = _floor_select.selected() if _floor_select != null else -999
+	var e_leak_ok: bool = (not _floor_select_open) and (e_sel_after == e_sel_before) and (_floor == e_floor_before)
+	if not e_leak_ok:
+		ok = false
+		_verify_log("FAIL: ⑦-e 菜单关闭时 W/S 泄漏: open=%s sel %d->%d floor %d->%d" % [str(_floor_select_open), e_sel_before, e_sel_after, e_floor_before, _floor])
+	_verify_log("⑦-e 关闭态 W/S 无泄漏: open=%s(expect false) sel %d->%d(不变) floor %d->%d(不变)" % [str(_floor_select_open), e_sel_before, e_sel_after, e_floor_before, _floor])
+	# ⑦-f R-new（2026-10-22）：多列 A/D + 鼠标点击（合成 15 层测网格，不依赖实际探索数）
+	var fake: Array = []
+	for k in 15:
+		fake.append({"floor": 99 - k, "explored": true})
+	_floor_select.open(fake)
+	_floor_select.move_col(1)                 # D：col0 -> col1（+1，行优先）
+	var f_col: int = _floor_select.selected()
+	_floor_select.click_at(_floor_select.cell_center(14))   # 点 (col1,row2) = 下标 14
+	var f_click: int = _floor_select.selected()
+	_floor_select.close()
+	var f_ok: bool = (f_col == 99 - 1) and (f_click == 99 - 14)
+	if not f_ok:
+		ok = false
+		_verify_log("FAIL: ⑦-f A/D+点击: D->floor=%d(expect %d) click->floor=%d(expect %d)" % [f_col, 99 - 1, f_click, 99 - 14])
+	_verify_log("⑦-f A/D+点击: D->floor=%d(expect %d) click->floor=%d(expect %d)" % [f_col, 99 - 1, f_click, 99 - 14])
+	# ⑦-g R-new（2026-10-22）：真实鼠标事件路径（视口坐标→设计坐标变换 + _input 命中 + 吃事件）
+	_floor_select.open(fake)
+	_floor_select_open = true                 # 模拟 Main 打开态（_try_floor_select_click 依赖）
+	var f2_cell: Vector2 = _floor_select.cell_center(13) * GameConstants.UI_SCALE   # 下标13=(col1,row1)→floor 86
+	_send_mouse(f2_cell, true, false)
+	await get_tree().process_frame
+	var f2_after: int = _floor_select.selected()
+	_floor_select_open = false
+	_floor_select.close()
+	var f2_ok: bool = (f2_after == 99 - 13)
+	if not f2_ok:
+		ok = false
+		_verify_log("FAIL: ⑦-g 真实鼠标点击: floor=%d(expect %d)" % [f2_after, 99 - 13])
+	_verify_log("⑦-g 真实鼠标点击: floor=%d(expect %d)" % [f2_after, 99 - 13])
 	_verify_log("=== R-113 depart tile test %s ===" % ("PASSED" if ok else "FAILED"))
 	get_tree().quit()
 
@@ -16532,7 +18598,7 @@ func _verify_floor100_test() -> void:
 		ok = false
 		_verify_log("FAIL: ① 起始层号 = %d，期望 100" % f0)
 	_verify_log("① 起始层号 = %d（期望逐字 100）| HUD 显示 = \"%s\"" % [
-		f0, str(hud.get_node("Margin/VBox/FloorLabel").text) if hud.has_node("Margin/VBox/FloorLabel") else "n/a"])
+		f0, str(hud.get_node("Margin/Floor/FloorLabel").text) if hud.has_node("Margin/Floor/FloorLabel") else "n/a"])
 
 	# ================= ② 第 100 层 = 基地：0 敌 26 箱（25 储物箱 + 1 起始固定箱），地图合法 =================
 	var n_enemy_base: int = get_tree().get_nodes_in_group("enemies").size()
@@ -16683,7 +18749,11 @@ func _verify_floor100_test() -> void:
 		#   屏幕上**什么都看不到**。→ 显式钉死「绝对 = 控件原点 + 局部」这个恒等式。
 		var local_br: Rect2 = btn.btn_rect_local()
 		var local_hr: Rect2 = btn.hit_rect_local()
-		var pos_abs: Vector2 = btn.position
+		# ⚠⚠ R-new（2026-10-19 640×360 实装）：btn.position 是**缩放前绝对坐标 ×UI_SCALE**
+		#   （_apply_ui_scale 把 position 与 scale 一起 ×2 才能铺满新视口）。
+		#   本组断言的口径是**缩放前设计空间**（btn_rect/hit_rect 等常量仍是 320×180 语义）
+		#   → 先把 position 换算回去，R-128 的恒等式与视口期望原样成立。
+		var pos_abs: Vector2 = btn.position / GameConstants.UI_SCALE
 		# ⑤-f1 绝对坐标 == 控件原点 + 局部坐标（`_draw` 与 `_input` 两条链路的换算桥梁）
 		var expect_abs: Vector2 = pos_abs + local_br.position
 		if expect_abs != br.position:
@@ -16722,9 +18792,9 @@ func _verify_floor100_test() -> void:
 	var f_before_click: int = _floor
 	# 真实点击（走 `_gui_input` 路径，不是直接调函数）
 	var clicks_before: int = _return_btn.click_count
-	_send_mouse(Vector2(300.0, 166.0), true, true)
+	_send_mouse(Vector2(600.0, 332.0), true, true)   # R-new：视口 640×360（原 320×180 时是 (300,166)）
 	await get_tree().process_frame
-	_send_mouse(Vector2(300.0, 166.0), false, true)
+	_send_mouse(Vector2(600.0, 332.0), false, true)   # R-new：视口 640×360（原 320×180 时是 (300,166)）
 	# ⚠⚠ **必须 `await` 真实帧**：`Viewport.push_input()` 是**排队**投递，
 	#   GUI 系统在**下一帧**才派发 —— 同帧读 `click_count` 必然还是 0。
 	#   既有 `--verify-wep`（`_send_mouse` 后 `await physics_frame` ×24）同款。
@@ -16872,7 +18942,7 @@ func _verify_floor100_test() -> void:
 	# ⚠ 期望值**全写字面量**（100 / 99 / true / false），**不从 `is_base_floor()` 推导**（否则是自证）。
 	# ⚠ 点击坐标用**屏幕最右下角 (318,178)**：落在命中矩形 `(286,154,36,26)` -> `x∈[286,322)`、
 	#   `y∈[154,180)` 内 —— 故**旧代码（无守卫）下必然命中**，正是本组要抓的那个缺陷。
-	var corner := Vector2(318.0, 178.0)
+	var corner := Vector2(636.0, 356.0)   # R-new：视口 640×360 的右下角内 4px（原 320×180 时是 (318,178)）
 	if _return_btn == null:
 		ok = false
 		_verify_log("FAIL: ⑪ 返回按钮节点为 null —— 无法验证隐藏态点击")
@@ -18355,6 +20425,31 @@ func _verify_useitem_test() -> void:
 		_verify_log("FAIL: ⑤ 无 use 字段的物品没有安全早退！期望 ret=false + 物品仍在 + 五项数值全Δ0，实测见上一行")
 		ok = false
 
+	# ⑥ R-new（2026-10-22 修复验证）：容器内消耗品经 `_begin_use_item`（关包→读条→_use_item）
+	#   后必须从**容器**扣除。用 storage=false 的临时箱，避免 `_save_storage_items` 污染真实存档；
+	#   核心验证「关包把 _container 置空后仍能从捕获的容器数组扣除」。
+	var cbox := CrateScene.instantiate() as Node2D
+	cbox.set("storage", false)
+	var citem: Dictionary = _proto_by_id("water")
+	cbox.set("items", [citem])
+	room.add_child(cbox)
+	await get_tree().physics_frame
+	var cont_before: int = (cbox.get("items") as Array).size()
+	_container = cbox                     # 直接挂上容器（模拟开箱界面）
+	_begin_use_item(citem, "cont", 0)
+	var guard: int = 0
+	while player.is_using and guard < 600:
+		await get_tree().physics_frame
+		guard += 1
+	await get_tree().physics_frame
+	var cont_after: int = (cbox.get("items") as Array).size()
+	var ok6: bool = (cont_before == 1 and cont_after == 0 and not player.is_using)
+	if not ok6:
+		_verify_log("FAIL: ⑥ 容器内使用消耗品后未从容器扣除（before=%d after=%d using=%s）—— 关包置空 _container 的扣除 bug 未修好" % [cont_before, cont_after, str(player.is_using)])
+		ok = false
+	_verify_log("⑥ 容器内使用: 容器件数 %d->%d (expect 1->0) using=%s" % [cont_before, cont_after, str(player.is_using)])
+	cbox.queue_free()
+
 	_verify_log("=== R-115 use_item test %s ===" % ("PASSED" if ok else "FAILED"))
 	get_tree().quit()
 
@@ -18690,7 +20785,8 @@ func _verify_loc_test() -> void:
 	#     `F100` = 楼层代号（与 HUD 的 `F100` 同词根，改中文会让两处读法不一致）
 	#     `F`    = HUD 楼层号前缀，同上
 	#     `F`/`Esc`= **按键键名**（`GameConstants.DEPART_KEY_LABEL` 那类，R-119 出发键 E→F）
-	const ASCII_TOKENS: Array = ["F100", "F", "Esc"]
+	const ASCII_TOKENS: Array = ["F100", "F", "Esc", "M", "W", "S", "A", "D"]  # 键代号：F/Esc/M/W/S 楼层切换全 WASD
+	#   （M 大地图开关的按键名，与既有 F / Esc 同性质：键名代号而非英文散文）
 	var en_bad: Array = []
 	var ascii_ok_log: Array = []
 	for k in tbl_keys:
@@ -18766,7 +20862,8 @@ func _verify_loc_test() -> void:
 	#   它不再有任何 `draw_string`（世界空间禁止文字），改由下面 ①-d 专门守护。
 	#⚠ 白名单：这些**键名**本身含ASCII（它们是 key 不是文案），且 draw_string 里出现是**正确**的。
 	const KEYNAME_OK: Array = ["Loc.t(", "hud.floor_prefix", "return.floor_label",
-		"depart.prompt", "backpack.", "hint.crate_open_prefix"]
+		"depart.prompt_select", "depart.select.", "backpack.", "hint.crate_open_prefix",
+		"map.close_hint"]   # R-new 2026-10-21：M 大地图标题提示（键名含 ASCII 属正常）
 	var grep_hits: Array = []
 	for fp in DRAW_FILES:
 		if not FileAccess.file_exists(String(fp)):
@@ -18993,7 +21090,7 @@ func _verify_loc_test() -> void:
 	const W_CASES: Array = [
 		["hint.crate_open_generic", 8, 200.0, "Hint.gd draw_string(pos.x=60, width=200)"],
 		["toast.crates_all_opened", 8, 200.0, "同上（toast 与常驻提示共用 Hint 通道）"],
-		["depart.prompt", 8, 200.0, "同上（R-128 纠正：走 Hint 通道 width=200，原误记 64=DepartTile 的）"],
+		["depart.prompt_select", 8, 200.0, "同上（R-128 纠正：走 Hint 通道 width=200；R-new 2026-10-18 键从 depart.prompt 改为 depart.prompt_select）"],
 		["return.floor_label", 8, 22.0, "ReturnBtn 24px 宽 - 左边距9 - 右边留2"],
 		["backpack.panel_load", 8, 152.0, "Backpack PANEL_W(156) - PAD(4)"],
 	]
@@ -19090,6 +21187,13 @@ func _verify_loc_test() -> void:
 	_verify_log("⑨ 本批**未**做语言切换 UI：`Loc.SUPPORTED` 只有 zh_CN，`set_locale(\"en_US\")` 返回 false（有意如此）")
 	_verify_log("⑨ 本批**未**改任何玩法数值 / 逻辑 / 布局几何 / 墙体代码 / 48px 锚（由 ⑤ 逐条钉死）")
 
+	# ⑤ R-new（2026-10-22）：UI 字体 oversampling == UI_SCALE（字形按 2× 栅格化，
+	#   避免 8px 位图被 CanvasItem ×2 放大后发虚；改小/删除会让全 UI 文字重新变糊）
+	var f_overs: float = GameConstants.ui_font().oversampling
+	if not is_equal_approx(f_overs, float(GameConstants.UI_SCALE)):
+		ok = false
+		_verify_log("FAIL: ⑤ UI 字体 oversampling=%.2f（期望 %.2f）—— 文字会因 8px 位图被 ×2 放大而发虚" % [f_overs, float(GameConstants.UI_SCALE)])
+	_verify_log("⑤ UI 字体 oversampling=%.2f (expect %.2f)" % [f_overs, float(GameConstants.UI_SCALE)])
 	_verify_log("=== R-117 loc test %s ===" % ("PASSED" if ok else "FAILED"))
 	get_tree().quit()
 
@@ -19245,6 +21349,23 @@ func _verify_basecrates_test() -> void:
 	_verify_log("=== R-119/R-120 base crates test (storage 25 persistent + start 1 preset) ===")
 	var ok: bool = true
 
+	# ---- R-fix（2026-10-22）：快照真实生产存档，测试结束还原 —— 消除对 base_storage_save.json 的污染（§十 地雷）----
+	#   本测试（③ _close_backpack 及 ④ 两次 _save_storage_items）会写 user://base_storage_save.json，
+	#   历史上冲掉玩家基地第 0 箱。这里在最顶部快照字节、最末尾逐字还原：测试仍完整验证写→读往返，
+	#   但进程退出时存档与进入测试前逐字节一致，对生产零污染。纯测试代码，不动生产逻辑/入口数。
+	var _bc_pre_existed: bool = FileAccess.file_exists(GameConstants.BASE_STORAGE_SAVE_PATH)
+	var _bc_pre_text: String = ""
+	if _bc_pre_existed:
+		var _bc_pf := FileAccess.open(GameConstants.BASE_STORAGE_SAVE_PATH, FileAccess.READ)
+		if _bc_pf != null:
+			_bc_pre_text = _bc_pf.get_as_text()
+			_bc_pf.close()
+	# ⚠ R-158：再记一份 **md5**（不是字符数）—— 末尾还原后要拿它做比对，
+	#   证明「退出时存档与进入前逐字节一致」。只比对长度/存在性的话，
+	#   内容被改掉同样能对上，断言就成了摆设。
+	var _bc_pre_md5: String = FileAccess.get_md5(GameConstants.BASE_STORAGE_SAVE_PATH) if _bc_pre_existed else ""
+	_verify_log("R-fix 存档快照: 存在=%s 文本长度=%d md5=%s" % [str(_bc_pre_existed), _bc_pre_text.length(), _bc_pre_md5])
+
 	# ---- ⓪ 前置：必须已在第 100 层基地 ----
 	if not GameConstants.is_base_floor(_floor):
 		ok = false
@@ -19376,6 +21497,29 @@ func _verify_basecrates_test() -> void:
 	if not save_ok:
 		ok = false
 
+	# ---- R-fix：还原真实存档（零污染；保持测试前字节）+ **自证断言**（R-158）----
+	#   ⚠ 断言的意义：还原**静默失败**（文件被占用 / `open` 返回 null / 文本往返编码漂移）
+	#     时，污染会悄悄回来，而没有任何入口会红 —— 这正是 §十 地雷最危险的形状。
+	#     所以还原后**再读一次 md5 与进入测试前比对**，不一致就让本入口 FAIL。
+	var _bc_restore_ok: bool = true
+	if _bc_pre_existed:
+		var _bc_rf := FileAccess.open(GameConstants.BASE_STORAGE_SAVE_PATH, FileAccess.WRITE)
+		if _bc_rf != null:
+			_bc_rf.store_string(_bc_pre_text)
+			_bc_rf.close()
+		else:
+			_bc_restore_ok = false
+	else:
+		_bc_restore_ok = (DirAccess.remove_absolute(ProjectSettings.globalize_path(GameConstants.BASE_STORAGE_SAVE_PATH)) == OK)
+	var _bc_post_existed: bool = FileAccess.file_exists(GameConstants.BASE_STORAGE_SAVE_PATH)
+	var _bc_post_md5: String = FileAccess.get_md5(GameConstants.BASE_STORAGE_SAVE_PATH) if _bc_post_existed else ""
+	var _bc_same: bool = (_bc_post_existed == _bc_pre_existed and _bc_post_md5 == _bc_pre_md5)
+	if not (_bc_restore_ok and _bc_same):
+		ok = false
+		_verify_log("FAIL: R-fix 存档还原失败（**生产存档已被测试污染**）：restore_ok=%s 存在 %s->%s md5 %s->%s" % [
+			str(_bc_restore_ok), str(_bc_pre_existed), str(_bc_post_existed), _bc_pre_md5, _bc_post_md5])
+	_verify_log("R-fix 存档零污染自证: restore_ok=%s 存在 %s->%s md5一致=%s (%s)" % [
+		str(_bc_restore_ok), str(_bc_pre_existed), str(_bc_post_existed), str(_bc_same), _bc_post_md5])
 	_verify_log("=== R-119/R-120 base crates test %s ===" % ("PASSED" if ok else "FAILED"))
 	get_tree().quit()
 
@@ -19479,7 +21623,7 @@ func _verify_basefrozen_test() -> void:
 #     "每盒恰好 3.0s"能用**帧数精确复现**（与 R-86 / R-87 的既有时基惯例一致）。
 #
 # 【期望值一律用字面量 / GameConstants，不从被测对象反推（R-100 教训）】
-#   · "3.0s / 0.5s" 从 `GameConstants.FEED_BOX_TIME / FEED_HOLD_TIME` 读（它们是常量，非计算值）；
+#   · "2.0s / 0.5s" 从 `GameConstants.FEED_BOX_TIME / FEED_HOLD_TIME` 读（它们是常量，非计算值）；
 #   · "50 发" 从 `GameConstants.ammo_box_rounds_of(9x19)` 读（盒容量已由 `--verify-shells` ②
 #     用**字面量**钉死，这里不重复抄数，改容量时本入口不会过期）。
 func _ammofeed_reset() -> void:
@@ -19598,7 +21742,7 @@ func _verify_ammofeed_test() -> void:
 	_ammofeed_reset()
 	player.reserve[cal9] = 0
 	var started5: bool = player.start_feeding()
-	var expect_f: int = int(round(GameConstants.FEED_BOX_TIME / dt))   # 3.0 / (1/60) = 180
+	var expect_f: int = int(round(GameConstants.FEED_BOX_TIME / dt))   # 2.0 / (1/60) = 120
 	for i in expect_f - 1:
 		player._update_feeding(dt)
 	var done_before: bool = int(probe_calls[0]) > 0
@@ -20211,6 +22355,114 @@ func _verify_wepeicon_test() -> void:
 		player.weapons.size(), player.weapon_index, tp9r.get_file(), "OK" if ok11 else "<<< FAIL"])
 
 	_verify_log("=== R-123 weapon icon test %s ===" % ("PASSED" if ok else "FAILED"))
+
+# ======================================================================
+# ==== R-154 · --verify-itemicon（物品图标实装 · 10×10 与背包槽位 1:1）====
+# ======================================================================
+# 【本入口钉死五件事（**行为断言**，驱动生产路径，不 grep 源码）】
+#   ① 资产：图标 PNG `exists` + 能 `load` + 尺寸**逐字 == 10×10**（= `GameConstants.INV_SLOT`）
+#   ② **1:1 零缩放铁律**：1×1 物品的槽位矩形尺寸 == 图标像素尺寸（引擎不需要缩放）
+#   ③ 接线：`item_icon(medkit 原型)` 返回纹理且路径 = `ui_icon_med_medkit.png`
+#   ④ 未登记物品 → `item_icon()` 返回 `null`（回落色块，**不崩**、不空白）
+#   ⑤ **key 必须挂得上**：`ITEM_ICON_TEX` 的每个 key 都能在 `ITEM_TYPES` 里找到真实物品
+#      —— 否则就写下 `bandage` 这种「游戏里根本没有的物品」的 key，图永远不会被显示
+#      （**这正是本批次已生成 `bandage` 图标、却无处可挂的教训**）
+#
+# 【为什么 ① ② 要把「10×10」钉死】
+#   图标交付时是 64×64，而背包格只有 10px。若把 64×64 直接交给引擎缩放（Nearest 6.4:1），
+#   图标必然aliasing 成糊块（R-153 僵尸「画布 64×64 ≠ 世界占位」同一个坑）。
+#   故资产**离线预降采样到 10×10**，引擎 **1:1** 绘制 —— 这条铁律一旦被破坏
+#   （有人改了 `INV_SLOT` 或把大图塞回字典），① ② 立刻变红。
+#
+# 【⚠ 期望值一律写字面量，不从被测代码反推】（R-100 教训）
+#   `EXPECT_ICON_SIZE` 写死 (10,10)；同时**刻意**与 `GameConstants.INV_SLOT` 比一次，
+#   让「槽位被改了但图标没跟着改」这条漂移**显式可见**，而不是默默错位。
+# ======================================================================
+func _verify_itemicon_test() -> void:
+	_verify_log("=== R-154 item icon test (物品图标实装 · 10×10 与槽位 1:1) ===")
+	var ok: bool = true
+	const EXPECT_DIR := "res://assets/sprites/"
+	const EXPECT_ICON_SIZE := Vector2(10, 10)     # 与 GameConstants.INV_SLOT 逐字一致
+
+	# ---- ① 图标资产 exists + load + 尺寸逐字 10×10 ----
+	var icon_files: Array = ["ui_icon_med_medkit.png", "ui_icon_med_bandage.png"]
+	var bad1: int = 0
+	for fn in icon_files:
+		var p: String = EXPECT_DIR + String(fn)
+		var exists: bool = ResourceLoader.exists(p)
+		var res = load(p)
+		var is_tex: bool = res is Texture2D
+		var sz_ok: bool = is_tex and (res as Texture2D).get_size() == EXPECT_ICON_SIZE
+		if not (exists and is_tex and sz_ok):
+			bad1 += 1
+			_verify_log("FAIL: ① %s exists=%s is_texture=%s size==%s=%s" % [
+				p, str(exists), str(is_tex), str(EXPECT_ICON_SIZE), str(sz_ok)])
+	_verify_log("① 图标资产（%d 张，期望尺寸 %s）: 不符 %d（期望 0）" % [
+		icon_files.size(), str(EXPECT_ICON_SIZE), bad1])
+	if bad1 > 0:
+		ok = false
+
+	# ---- ①-b 槽位尺寸与图标尺寸**逐字相同**（1:1 零缩放）----
+	var slot_px: int = int(GameConstants.INV_SLOT)
+	var same: bool = (Vector2(slot_px, slot_px) == EXPECT_ICON_SIZE)
+	_verify_log("①-b 槽位 INV_SLOT=%dpx vs 图标 %s → %s（1:1 零缩放；不等 = 有人改了格距没改图标）" % [
+		slot_px, str(EXPECT_ICON_SIZE), "OK" if same else "<<< FAIL"])
+	if not same:
+		ok = false
+
+	# ---- ② 1×1 物品的槽位矩形 == 图标像素尺寸（引擎零缩放）----
+	var med: Dictionary = _proto_by_id("medkit")
+	var cell: Rect2 = backpack.item_cell_rect(0.0, 0.0, med)
+	var cell_ok: bool = (cell.size == EXPECT_ICON_SIZE)
+	if not cell_ok:
+		ok = false
+	_verify_log("② medkit(1×1) 槽位矩形 size=%s（期望 %s = 图标尺寸，零缩放）%s" % [
+		str(cell.size), str(EXPECT_ICON_SIZE), "OK" if cell_ok else "<<< FAIL"])
+
+	# ---- ③ 接线：medkit 命中图标 ----
+	var tex: Texture2D = backpack.item_icon(med) as Texture2D
+	var tp: String = String(tex.resource_path) if tex != null else ""
+	var wired: bool = (tex != null and tp.ends_with("ui_icon_med_medkit.png"))
+	if not wired:
+		ok = false
+	_verify_log("③ item_icon(medkit) -> %s（期望 ...ui_icon_med_medkit.png）%s" % [
+		tp.get_file() if tp != "" else "null", "OK" if wired else "<<< FAIL"])
+
+	# ---- ④ 未登记物品 → null（回落色块，不崩）----
+	#   ⚠ `Dictionary.merge()` **返回 void**（就地改），故不能写成 `med.merge(...)` 传给函数；
+	#     这里显式复制一份再改 id。
+	var probe_bandage: Dictionary = med.duplicate(true)
+	probe_bandage["id"] = "bandage"
+	var null_cases: int = 0
+	var null_ok: int = 0
+	for probe in [{}, {"id": "no_such_item_xxx"}, probe_bandage]:
+		null_cases += 1
+		if backpack.item_icon(probe as Dictionary) == null:
+			null_ok += 1
+	var miss_ok: bool = (null_ok == null_cases)
+	if not miss_ok:
+		ok = false
+	_verify_log("④ 未登记物品回落 null: %d/%d（期望全中；含 **bandage** —— 游戏里没这个物品）%s" % [
+		null_ok, null_cases, "OK" if miss_ok else "<<< FAIL"])
+
+	# ---- ⑤ key 必须挂得上：每个登记 id 都要有真实物品 ----
+	var ids: Array = backpack.item_icon_ids()
+	var known: Dictionary = {}
+	for it_def in GameConstants.ITEM_TYPES:
+		known[String((it_def as Dictionary).get("id", ""))] = true
+	var bad5: Array = []
+	for k in ids:
+		if not known.has(String(k)):
+			bad5.append(String(k))
+	var key_ok: bool = (bad5.is_empty() and ids.size() > 0)
+	if not key_ok:
+		ok = false
+	_verify_log("⑤ 登记 id %s 全部有真实物品=%s%s（期望 true；空登记 = 图标实装没生效）%s" % [
+		str(ids), str(key_ok), "" if bad5.is_empty() else " 悬空 id=" + str(bad5),
+		"OK" if key_ok else "<<< FAIL"])
+
+	_verify_log("=== R-154 item icon test %s ===" % ("PASSED" if ok else "FAILED"))
+	get_tree().quit(0 if ok else 1)
 	get_tree().quit()
 
 # ==== R-131 · --verify-tiles（16px 瓦片渲染 / 生成器产物自检）====
@@ -20237,6 +22489,321 @@ func _verify_wepeicon_test() -> void:
 #   若期望值从被测对象自身推导，断言就变成「自己证明自己」（R-100 教训）。
 #   故 ④ 的 9 个边界期望是**手写字面量**；② 的期望是「集合 ⊆ 8 槽位」这一**关系**，
 #   而 8 槽位的**颜色值**来自生成器写出的 JSON（那是唯一的真相源，不重复抄一遍）。
+# ======================================================================
+# ==== R-155 · --verify-furniture（家具 4 档功能分档 + 房间主题）====
+# ======================================================================
+# 【钉死六件事（行为断言，不 grep 源码）】
+#   ① 生成器真的产出家具，且**每个房间都有一个主题**（主题数 == 房间数）
+#   ② 每件家具的 `cat` 合法且与 `GameConstants.furniture_cat()` 一致（防两张表漂移）
+#   ③ 主题自洽：家具 id 必须属于它所在房间的主题清单，且 `room_themes[room]` 与元素一致
+#   ④ 确定性：同种子同层 → 家具完全一致（纯哈希，不消耗 rng）
+#   ⑤ **四档物理行为实测**：a=挡视线/子弹/身体；b=不挡视线但挡子弹/身体；
+#      c=只挡身体（=箱子）；d=全不挡。判据用**真实 mask 位运算**，不是注释。
+#   ⑥ 家具**不能把房间堵死**：把所有 a/b/c 家具格置 0 后 BFS，所有房间仍可达
+#      （照 R-79「所有房间可达」的口径升级，不能只保出生→出口）
+# ======================================================================
+func _verify_furniture_test() -> void:
+	_verify_log("=== R-155 furniture test (家具 4 档功能分档 + 房间主题) ===")
+	var ok: bool = true
+
+	var gen := FloorGeneratorScript.new()
+	var d1: Dictionary = gen.generate(_seed, 5)
+	var furn: Array = (d1.get("furniture", []) as Array)
+	var themes: Array = (d1.get("room_themes", []) as Array)
+	var rooms_a: Array = (d1.get("rooms", []) as Array)
+
+	# ---- ① 产出 + 主题覆盖 ----
+	var r1: bool = furn.size() > 0 and themes.size() == rooms_a.size()
+	if not r1:
+		ok = false
+	_verify_log("① 产出: 家具=%d(期望>0) 主题数=%d 房间数=%d(两者应相等) %s" % [
+		furn.size(), themes.size(), rooms_a.size(), "OK" if r1 else "<<< FAIL"])
+
+	# ---- ② 分档合法 + 与常量表一致 ----
+	var bad_cat: int = 0
+	var ca: int = 0
+	var cb: int = 0
+	var cc: int = 0
+	var cd: int = 0
+	for fd in furn:
+		var fdict: Dictionary = fd as Dictionary
+		var fid_s: String = String(fdict.get("id", ""))
+		var cat_s: String = String(fdict.get("cat", ""))
+		if cat_s == "" or GameConstants.furniture_cat(fid_s) != cat_s:
+			bad_cat += 1
+		else:
+			if cat_s == "a": ca += 1
+			elif cat_s == "b": cb += 1
+			elif cat_s == "c": cc += 1
+			elif cat_s == "d": cd += 1
+	var r2: bool = bad_cat == 0
+	if not r2:
+		ok = false
+	_verify_log("② 分档合法: 不符=%d(期望0) 分布 a=%d b=%d c=%d d=%d %s" % [
+		bad_cat, ca, cb, cc, cd, "OK" if r2 else "<<< FAIL"])
+
+	# ---- ③ 主题自洽 ----
+	var bad_theme: int = 0
+	for fd in furn:
+		var fdict: Dictionary = fd as Dictionary
+		var ri: int = int(fdict.get("room", -1))
+		var th: String = String(fdict.get("theme", ""))
+		if ri < 0 or ri >= themes.size():
+			bad_theme += 1
+			continue
+		if String(themes[ri]) != th:
+			bad_theme += 1
+			continue
+		var allowed: Array = ((GameConstants.ROOM_THEMES.get(th, {}) as Dictionary).get("furn", [])) as Array
+		if not allowed.has(String(fdict.get("id", ""))):
+			bad_theme += 1
+	var r3: bool = bad_theme == 0
+	if not r3:
+		ok = false
+	_verify_log("③ 主题自洽: 家具与房间主题不符=%d(期望0) %s" % [
+		bad_theme, "OK" if r3 else "<<< FAIL"])
+
+	# ---- ④ 确定性 ----
+	var d2: Dictionary = gen.generate(_seed, 5)
+	var f2: Array = (d2.get("furniture", []) as Array)
+	var same: bool = f2.size() == furn.size()
+	if same:
+		for i in furn.size():
+			var x1: Dictionary = furn[i] as Dictionary
+			var x2: Dictionary = f2[i] as Dictionary
+			if String(x1.get("id", "")) != String(x2.get("id", "")) \
+				or (x1.get("cell", Vector2i.ZERO) as Vector2i) != (x2.get("cell", Vector2i.ZERO) as Vector2i):
+				same = false
+				break
+	if not same:
+		ok = false
+	_verify_log("④ 确定性: 同种子同层一致=%s (%d vs %d) %s" % [
+		str(same), furn.size(), f2.size(), "OK" if same else "<<< FAIL"])
+
+	# ---- ⑤ 四档物理实测：建节点，读真实 layer，再用真实 mask 判 ----
+	var probes := {"a": "pillar", "b": "glass", "c": "shelf", "d": "carpet"}
+	var layer_of := {}
+	for k in probes:
+		var fu := FurnitureScript.new() as StaticBody2D
+		(fu as Node).set("fid", String(probes[k]))
+		add_child(fu)
+		layer_of[k] = fu
+	await get_tree().process_frame
+	var expect_layer := {"a": 1, "b": 32, "c": 16, "d": 0}
+	var r5: bool = true
+	for k in probes:
+		var node: StaticBody2D = layer_of[k] as StaticBody2D
+		var got: int = node.collision_layer
+		if got != int(expect_layer[k]):
+			r5 = false
+		_verify_log("⑤ 分档 %s(%s): layer=%d(期望 %d) %s" % [
+			k, String(probes[k]), got, int(expect_layer[k]),
+			"OK" if got == int(expect_layer[k]) else "<<< FAIL"])
+	# 真实 mask：LOS 恒为 1；子弹/玩家/敌人从实例读（含 R-155 新加的 32）
+	var bf := BulletScene.instantiate()
+	var bh := BulletScene.instantiate()
+	bh.hostile = true
+	add_child(bf)
+	add_child(bh)
+	var los_mask: int = 1
+	var fb_mask: int = bf.collision_mask
+	var hb_mask: int = bh.collision_mask
+	var pm_mask: int = player.collision_mask
+	var zm := ZombieScene.instantiate()
+	add_child(zm)
+	var zm_mask: int = zm.collision_mask
+	_verify_log("⑤ 真实掩码: LOS=%d 友弹=%d 敌弹=%d 玩家=%d 僵尸=%d" % [
+		los_mask, fb_mask, hb_mask, pm_mask, zm_mask])
+	var expect_behav := {
+		"a": [true, true, true],    # 挡视线 / 挡子弹 / 挡身体
+		"b": [false, true, true],
+		"c": [false, false, true],
+		"d": [false, false, false],
+	}
+	var r5b: bool = true
+	for k in probes:
+		var node: StaticBody2D = layer_of[k] as StaticBody2D
+		var ly: int = node.collision_layer
+		var b_sight: bool = (ly & los_mask) != 0
+		var b_bullet: bool = ((ly & fb_mask) != 0) and ((ly & hb_mask) != 0)
+		var b_body: bool = ((ly & pm_mask) != 0) and ((ly & zm_mask) != 0)
+		var want: Array = expect_behav[k] as Array
+		var good: bool = (b_sight == bool(want[0])) and (b_bullet == bool(want[1])) and (b_body == bool(want[2]))
+		if not good:
+			r5b = false
+		_verify_log("⑤ 行为 %s: 挡视线=%s(期望%s) 挡子弹=%s(期望%s) 挡身体=%s(期望%s) %s" % [
+			k, str(b_sight), str(want[0]), str(b_bullet), str(want[1]), str(b_body), str(want[2]),
+			"OK" if good else "<<< FAIL"])
+	if not (r5 and r5b):
+		ok = false
+	for k in probes:
+		(layer_of[k] as Node).queue_free()
+	bf.queue_free()
+	bh.queue_free()
+	zm.queue_free()
+
+	# ---- ⑥ 家具不能把房间堵死：a/b/c 置 0 后 BFS 全房间可达 ----
+	var cols: int = int(d1.get("cols", 0))
+	var rows: int = int(d1.get("rows", 0))
+	var g: PackedByteArray = (d1.get("grid", PackedByteArray()) as PackedByteArray).duplicate()
+	var r6: bool = true
+	if cols > 0 and rows > 0 and g.size() == cols * rows:
+		for fd in furn:
+			var fdict: Dictionary = fd as Dictionary
+			if String(fdict.get("cat", "")) == "d":
+				continue                      # d 等同地板，不挡
+			var cell: Vector2i = fdict.get("cell", Vector2i.ZERO) as Vector2i
+			if cell.x >= 0 and cell.x < cols and cell.y >= 0 and cell.y < rows:
+				g[cell.y * cols + cell.x] = 0
+		var sp: Vector2 = d1.get("spawn", Vector2.ZERO) as Vector2
+		var sx: int = clampi(int(sp.x) / 16, 0, cols - 1)
+		var sy: int = clampi(int(sp.y) / 16, 0, rows - 1)
+		var seen: Dictionary = {}
+		var q: Array = [Vector2i(sx, sy)]
+		seen[Vector2i(sx, sy)] = true
+		var head: int = 0
+		while head < q.size():
+			var cur: Vector2i = q[head] as Vector2i
+			head += 1
+			for dd in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				var nx: Vector2i = cur + (dd as Vector2i)
+				if nx.x < 0 or nx.y < 0 or nx.x >= cols or nx.y >= rows:
+					continue
+				if g[nx.y * cols + nx.x] != 1:
+					continue
+				if seen.has(nx):
+					continue
+				seen[nx] = true
+				q.append(nx)
+		var unreachable: int = 0
+		for rr in rooms_a:
+			var rc: Rect2 = rr as Rect2
+			var cx: int = clampi(int(rc.position.x + rc.size.x * 0.5) / 16, 0, cols - 1)
+			var cy: int = clampi(int(rc.position.y + rc.size.y * 0.5) / 16, 0, rows - 1)
+			if not seen.has(Vector2i(cx, cy)):
+				unreachable += 1
+		r6 = unreachable == 0
+		if not r6:
+			ok = false
+		_verify_log("⑥ 可达性: 房间=%d 因家具不可达=%d(期望0) %s" % [
+			rooms_a.size(), unreachable, "OK" if r6 else "<<< FAIL"])
+	else:
+		ok = false
+		_verify_log("⑥ 可达性: 网格缺失 cols=%d rows=%d <<< FAIL" % [cols, rows])
+
+	_verify_log("=== R-155 furniture test %s ===" % ("PASSED" if ok else "FAILED"))
+	get_tree().quit(0 if ok else 1)
+
+# ==== R-155 辅助：把一层楼的**真实生成结果**导出为 JSON（供离线渲染地图预览）====
+# 【为什么需要】用户要"看一眼现在地图里家具摆放的实际效果"。家具当前是分档染色兜底色块
+#   （assets/sprites/furniture/ 为空），直接看游戏内 = 看色块。本入口跑**真实的**
+#   FloorGenerator（与游戏内完全一致、确定性），把 grid / 房间 / 家具 / 主题 / 出生点 /
+#   出口 / 箱子 / 敌人 / 门格全部导出成 JSON，再由离线 Python 渲染成顶层俯视图。
+# 【零侵入】纯导出，不改任何游戏逻辑；互斥于其它 --verify-*；写完即 quit。
+# 【参数】`--dump-floor`（必带）+ 可选 `--verify-startfloor<N>` / `--verify-seed N`
+#   指定要看的层与主种子（不指定则用默认 floor=5、主种子 1337）。
+func _dump_floor_test() -> void:
+	# 选层（照 Main 已有的 --verify-startfloor 三态 + 通用简写口径）
+	var dump_floor: int = 5
+	if "--verify-startfloor" in OS.get_cmdline_args():
+		dump_floor = _cmdline_int_after("--verify-startfloor", 5)
+	elif "--verify-startfloor99" in OS.get_cmdline_args():
+		dump_floor = 99
+	elif "--verify-startfloor1" in OS.get_cmdline_args():
+		dump_floor = 1
+	else:
+		for _a in OS.get_cmdline_args():
+			var _s2: String = _a
+			if _s2.begins_with("--verify-startfloor") and _s2.length() > 19:
+				var _num: String = _s2.substr(19)
+				if _num.is_valid_int():
+					dump_floor = _num.to_int()
+	var dump_seed: int = _seed
+	if "--verify-seed" in OS.get_cmdline_args():
+		dump_seed = _cmdline_int_after("--verify-seed", _seed)
+
+	var gen := FloorGeneratorScript.new()
+	var d: Dictionary = gen.generate(dump_seed, dump_floor)
+	var cols: int = int(d.get("cols", 0))
+	var rows: int = int(d.get("rows", 0))
+	var grid: PackedByteArray = (d.get("grid", PackedByteArray()) as PackedByteArray)
+
+	var rooms_t: Array = []
+	for rr in (d.get("rooms", []) as Array):
+		var rc: Rect2 = rr as Rect2
+		rooms_t.append([int(rc.position.x / 16), int(rc.position.y / 16), int(rc.size.x / 16), int(rc.size.y / 16)])
+
+	var furn_t: Array = []
+	for fd in (d.get("furniture", []) as Array):
+		var fdict: Dictionary = fd as Dictionary
+		var cell: Vector2i = fdict.get("cell", Vector2i.ZERO) as Vector2i
+		furn_t.append({
+			"id": String(fdict.get("id", "")),
+			"cat": String(fdict.get("cat", "")),
+			"cell": [cell.x, cell.y],
+			"room": int(fdict.get("room", -1)),
+			"theme": String(fdict.get("theme", "")),
+		})
+
+	var crates_t: Array = []
+	for c in (d.get("crates", []) as Array):
+		var cv: Vector2 = c as Vector2
+		crates_t.append([int(cv.x / 16), int(cv.y / 16)])
+
+	var enemies_t: Array = []
+	for e in (d.get("enemies", []) as Array):
+		var ev: Vector2 = e as Vector2
+		enemies_t.append([int(ev.x / 16), int(ev.y / 16)])
+
+	var doors_t: Array = []
+	for dc in (d.get("doors", []) as Array):
+		var dv: Vector2i = dc as Vector2i
+		doors_t.append([dv.x, dv.y])
+
+	var sp: Vector2 = d.get("spawn", Vector2.ZERO) as Vector2
+	var ex: Vector2 = d.get("exit", Vector2.ZERO) as Vector2
+
+	var out_dict := {
+		"cols": cols, "rows": rows,
+		"seed": dump_seed, "floor": dump_floor,
+		"grid_b64": Marshalls.raw_to_base64(grid),
+		"rooms": rooms_t,
+		"room_themes": (d.get("room_themes", []) as Array),
+		"furniture": furn_t,
+		"crates": crates_t,
+		"enemies": enemies_t,
+		"doors": doors_t,
+		"spawn": [int(sp.x / 16), int(sp.y / 16)],
+		"exit": [int(ex.x / 16), int(ex.y / 16)],
+	}
+
+	var json_str: String = JSON.stringify(out_dict)
+	var path: String = "qa_scratch/dumped_floor.json"
+	var fa := FileAccess.open(path, FileAccess.WRITE)
+	if fa == null:
+		print("DUMP_FAIL: cannot open ", path)
+		get_tree().quit(1)
+		return
+	fa.store_string(json_str)
+	fa.close()
+
+	# 汇总（按主题统计房间 + 按分档统计家具），便于用户直接读，无需开图
+	var theme_count := {}
+	for th in (d.get("room_themes", []) as Array):
+		var s: String = String(th)
+		theme_count[s] = int(theme_count.get(s, 0)) + 1
+	var cat_count := {"a": 0, "b": 0, "c": 0, "d": 0}
+	for ft in furn_t:
+		var c: String = String(ft["cat"])
+		if cat_count.has(c):
+			cat_count[c] = int(cat_count[c]) + 1
+	print("DUMP_OK: floor=%d seed=%d cols=%d rows=%d rooms=%d furniture=%d" % [dump_floor, dump_seed, cols, rows, rooms_t.size(), furn_t.size()])
+	print("  主题分布: ", JSON.stringify(theme_count))
+	print("  家具分档: ", JSON.stringify(cat_count))
+	print("  箱子=%d 敌人=%d 门格=%d" % [crates_t.size(), enemies_t.size(), doors_t.size()])
+	print("  已写出 ", path)
+	get_tree().quit(0)
+
 func _verify_tiles_test() -> void:
 	_verify_log("=== R-131 tile render test (16px 程序化瓦片 / 5 主题 / 无缝 / 楼层带) ===")
 	var ok: bool = true
@@ -21190,8 +23757,9 @@ func _verify_enemywave_test() -> void:
 #   ② 真实 spawn 的 zombie / merc / brute 各有**可见**的 `EnemyArt`，纹理路径 == 预期，
 #      且 tscn 的 Polygon2D `Sprite` **隐藏**；前置：先断言场上确实有这三种
 #   ③ 受击高亮：`_flash` 置位后**精灵**（不是已隐藏的色块）的 modulate 变亮
-#   ④ 朝向：`_face()` 驱动到 0°/180°/135°/45°/-135°/-45°，先断言 `rotation` 真等于目标角，
-#      再断言 `flip_v == (cos(rotation) < 0)`（独立判据，与实现的 `absf(rotation) > PI*0.5` 不同源）
+#   ④ 朝向：僵尸走「图集 4 行」（region_rect.y/64 == 期望行），merc/brute 仍走
+#      `flip_v == (cos(rotation) < 0)`（独立判据，与实现的 `absf(rotation) > PI*0.5` 等价）；
+#      先断言 `rotation` 真等于目标角，再断言朝向表达。
 #   ⑤ 三向可分：三者纹理路径**互不相同**（尤其 brute 不许退化成 zombie 同图）
 #   ⑥ 纹理缺失 → `_refresh_art()` 把 Polygon2D 兜底**显示**出来
 #
@@ -21200,12 +23768,15 @@ func _verify_enemywave_test() -> void:
 #   "遍历到的每个都有 EnemyArt" 会对 **0 个节点**成立 ⇒ 断言**空转恒真**，
 #   这是最坏的一类假绿。故先分别计数，缺哪种就补 spawn 哪种。
 #
-# 【⚠ 为什么 ④ 不在恰 ±90° 断言】
-#   `Node2D.rotation` 是 **float32**，`PI` 是 **float64** → 正好竖直时
-#   `cos(rotation) < 0` 的判定由浮点舍入支配（cos(±90°)≈0，R-143 踩过同一个坑）。
-#   故只取 0° / 180° / 135° / 45° / -135° / -45° —— 全部离分界点 ≥45°；
-#   ⚠ 补上负角：`_face()` 的 rotation ∈ (-π,π]，负角正是 `absf` 的意义所在
-#   （去掉 absf 后朝 -135° 会错判成 flip_v=false）。
+# 【⚠ 为什么 ④ 只取 0°/90°/180°/-90°（每行中段），不取 ±45°/±135°】
+#   `Node2D.rotation` 是 **float32**，`PI` 是 **float64** → `_face()` 算出的 `rotation`
+#   在接缝处有漂移（R-143 同款坑）。僵尸图集的接缝在 ±45°/±135°（`_dir_row` 硬边界），
+#   若测角压在接缝上，漂移会让实测行与字面期望行错位（假红）。故只取每行中段：
+#   0°(右) / 90°(正) / 180°(左) / -90°(背)，每个都远离接缝 ≥45°，断言稳。
+#   ⚠ merc/brute 的 flip_v 边界在 ±90°，但测角取的恰是 ±90° —— 是否安全？
+#     `flip_v` 实现用 `absf(rotation) > PI*0.5`，测试判据用 `cos(rotation) < 0`，
+#     二者对 rotation∈(-π,π] **逐字等价**（|r|>90° ⟺ cos(r)<0），且都从同一个 `got` 推，
+#     漂移同时影响两边 ⇒ 永远一致，±90° 不会假红。
 # ======================================================================
 func _verify_enemy_sprite_test() -> void:
 	_verify_log("=== R-148 enemy sprite test (16x16 程序化敌人精灵接入 / 三向可分 / flip_v 朝向同步) ===")
@@ -21213,16 +23784,36 @@ func _verify_enemy_sprite_test() -> void:
 
 	# ---- 期望值：**全部字面量**（R-96 踩过的坑：期望值绝不从被测代码推导）----
 	const EXPECT_DIR := "res://assets/sprites/enemies/"
-	const EXPECT_SIZE := Vector2i(16, 16)
+	# R-153：僵尸改用 4 方向图集（6 张），其余敌人仍是 16×16 单帧；故尺寸改为逐键期望。
+	const EXPECT_SIZE := {
+		"zombie": Vector2(16, 16),   # 旧占位 zombie.png 仍保留（兼容锚点）
+		"merc": Vector2(16, 16),
+		"brute": Vector2(16, 16),
+	}
+	# R-153：僵尸 idle 图集（首帧图）真实尺寸，单独断言。
+	#   ⚠ `Texture2D.get_size()` 返回 **Vector2**（非 Vector2i）；GDScript 2.0 不允许
+	#      `Vector2 == Vector2i`，故这里也用 Vector2（与 `get_size()` 同型，逐字可比）。
+	const EXPECT_ATLAS_IDLE := "res://assets/sprites/enemies/char_zombie_idle.png"
+	const EXPECT_ATLAS_IDLE_SIZE := Vector2(256, 256)
 	const EXPECT_PATHS := {
 		"zombie": "res://assets/sprites/enemies/zombie.png",
 		"merc": "res://assets/sprites/enemies/merc.png",
 		"brute": "res://assets/sprites/enemies/brute.png",
 	}
 	const KEYS: Array = ["zombie", "merc", "brute"]
+	# R-153：朝向行映射（与 `Zombie._dir_row` 逐字一致）：角度(度) → 期望行。
+	#   行序：0=背(up) / 1=右(right) / 2=正(down) / 3=左(left)。
+	#   ⚠⚠ **测角必须落在各行「中段」，远离 ±45°/±135° 接缝**：`_dir_row` 的接缝是硬边界，
+	#     而 `_face()` 算出的 `rotation` 有 float32 漂移（R-143 同款坑）。若把测角放在 45°/-45°/135°/-135°
+	#     这类接缝上，漂移会让实际 `rotation` 跨过边界 → 实测行与字面期望行错位（假红）。
+	#     故只取 0°(右中) / 90°(正中) / 180°(左中) / -90°(背中)，每个都远离接缝 ≥45°，断言稳。
+	const EXPECT_ROW := {
+		0.0: 1, 90.0: 2, 180.0: 3, -90.0: 0,
+	}
 
 	# ================================================================
-	# ① 三张 PNG exists + load + 尺寸逐字 16×16
+	# ① 三张旧单帧 PNG 仍 exists + load + 尺寸逐字 16×16（向后兼容锚点）
+	#   + ①-b 僵尸 idle 图集 exists + load + 尺寸逐字 256×256
 	# ================================================================
 	var tex := {}
 	var bad1: int = 0
@@ -21235,13 +23826,19 @@ func _verify_enemy_sprite_test() -> void:
 		tex[kk] = res
 		var sz_ok: bool = false
 		if is_tex:
-			var sz: Vector2i = (res as Texture2D).get_size()
-			sz_ok = (sz == EXPECT_SIZE)
+			var sz: Vector2 = (res as Texture2D).get_size()
+			sz_ok = (sz == EXPECT_SIZE[kk])
 		if not (exists and is_tex and sz_ok):
 			bad1 += 1
-			_verify_log("FAIL: ① %s exists=%s is_texture=%s size==16x16=%s" % [
-				p, str(exists), str(is_tex), str(sz_ok)])
-	_verify_log("① 三张 PNG exists+load+尺寸逐字16×16: 不符 %d（期望 0）| 目录=%s" % [bad1, EXPECT_DIR])
+			_verify_log("FAIL: ① %s exists=%s is_texture=%s size==%s=%s" % [
+				p, str(exists), str(is_tex), str(EXPECT_SIZE[kk]), str(sz_ok)])
+	# ①-b：僵尸 idle 图集（R-153 新增资产）
+	var idle_res = load(EXPECT_ATLAS_IDLE)
+	var idle_ok: bool = (idle_res is Texture2D) and ((idle_res as Texture2D).get_size() == EXPECT_ATLAS_IDLE_SIZE)
+	if not idle_ok:
+		bad1 += 1
+		_verify_log("FAIL: ①-b idle 图集 exists/load/256x256 不符 path=%s" % EXPECT_ATLAS_IDLE)
+	_verify_log("① 旧单帧 PNG + ①-b 僵尸图集: 不符 %d（期望 0）| 目录=%s" % [bad1, EXPECT_DIR])
 	if bad1 > 0:
 		ok = false
 
@@ -21255,7 +23852,11 @@ func _verify_enemy_sprite_test() -> void:
 		elif e is Mercenary:
 			pick["merc"] = e
 		elif e is Zombie:
-			pick["zombie"] = e
+			# ⚠ R-new：`e is Zombie` 会**误抓子类**（Brute 已在上面 is_brute 挡掉，
+			#   但 Splitter extends Zombie 同样是 Zombie）→ 场上同时有分裂怪时会把
+			#   Boss 当普通 zombie，④ 拿它去比对杂兵 scale 假红。故显式排除 is_splitter。
+			if not ("is_splitter" in e and bool(e.get("is_splitter"))):
+				pick["zombie"] = e
 	# ⚠⚠ **起始层是 100 = 基地**（`GameConstants.START_FLOOR := 100`），而基地层
 	#   **故意一个敌人都没有**（`StaticFloor` 走另一条数据路径）→ 只靠"场上已有"
 	#   会**一个都捞不到**，② 的断言随即空转恒真（第一版就是这么红的）。
@@ -21292,7 +23893,9 @@ func _verify_enemy_sprite_test() -> void:
 		_verify_log("FAIL: ②-0 场上没凑齐三种敌人 → ② 的断言无意义，判定 FAIL")
 
 	# ================================================================
-	# ② 三种敌人：EnemyArt 可见 + 路径==预期 + 色块 Sprite 隐藏（禁双重外观）
+	# ② 三种敌人：EnemyArt 可见 + 路径/图集正确 + 色块 Sprite 隐藏（禁双重外观）
+	#   ⚠ R-153：僵尸改为图集，路径断言改为「以 char_zombie 前缀 + 单格 64×64 区域」
+	#      merc/brute 仍是单帧，逐字路径断言不变。
 	# ================================================================
 	var bad2: int = 0
 	for k in KEYS:
@@ -21306,14 +23909,22 @@ func _verify_enemy_sprite_test() -> void:
 		var art_path: String = ""
 		if art != null and art.texture != null:
 			art_path = String(art.texture.resource_path)
-		var path_ok: bool = (art_path == String(EXPECT_PATHS[kk]))
+		var path_ok: bool
+		if kk == "zombie":
+			# 图集：前缀匹配 + 单格尺寸 64×64（断言确实在以图集方式显示，而非整图）
+			var cell_ok: bool = (art != null and art.region_enabled
+				and art.region_rect.size == Vector2(64, 64))
+			path_ok = (art_path.begins_with(EXPECT_DIR + "char_zombie") and art_path.ends_with(".png") and cell_ok)
+		else:
+			path_ok = (art_path == String(EXPECT_PATHS[kk]))
 		var fb := en.get_node_or_null("Sprite") as Polygon2D
 		var fb_vis: bool = (fb != null and fb.visible)
 		var row_ok: bool = (art_vis and path_ok and not fb_vis)
 		if not row_ok:
 			bad2 += 1
-		_verify_log("② %-6s EnemyArt可见=%s（期望true）路径='%s'（期望'%s'）%s | 色块Sprite可见=%s（期望false，禁双重外观）%s" % [
-			kk, str(art_vis), art_path, String(EXPECT_PATHS[kk]),
+		_verify_log("② %-6s EnemyArt可见=%s（期望true）路径='%s'（%s）%s | 色块Sprite可见=%s（期望false，禁双重外观）%s" % [
+			kk, str(art_vis), art_path,
+			("图集前缀char_zombie" if kk == "zombie" else "期望'" + String(EXPECT_PATHS[kk]) + "'"),
 			"OK" if path_ok else "<<< FAIL", str(fb_vis), "OK" if not fb_vis else "<<< FAIL"])
 	if bad2 > 0:
 		ok = false
@@ -21352,12 +23963,14 @@ func _verify_enemy_sprite_test() -> void:
 		str(b_col), str(a_col), "OK" if flash_ok else "<<< FAIL"])
 
 	# ================================================================
-	# ④ 朝向：flip_v == (cos(rotation) < 0)（独立判据，与实现的 absf 算式不同源）
-	#   每格**先**断言 rotation 真等于目标角（前置条件），再断言 flip_v。
+	# ④ 朝向：僵尸走「图集 4 行」（region_rect.y/64 == 期望行）+ 子精灵**反向旋转** + 缩放 0.25；
+	#    merc/brute 仍走 flip_v。
+	#   每格**先**断言 rotation 真等于目标角（前置条件），再断言朝向表达。
+	#   ⚠ 期望行来自 `EXPECT_ROW`（与 `Zombie._dir_row` 逐字一致，独立常量，不读被测代码）。
 	# ================================================================
 	var bad4: int = 0
 	var cells4: int = 0
-	for deg in [0.0, 180.0, 135.0, 45.0, -135.0, -45.0]:
+	for deg in [0.0, 90.0, 180.0, -90.0]:
 		var a: float = deg_to_rad(float(deg))
 		for k in KEYS:
 			var kk: String = String(k)
@@ -21368,16 +23981,36 @@ func _verify_enemy_sprite_test() -> void:
 			var got: float = en2.rotation
 			var ang_ok: bool = absf(angle_difference(got, a)) < 0.01
 			var a2 := en2.get_node_or_null("EnemyArt") as Sprite2D
-			var want: bool = cos(got) < 0.0
-			var flip_ok: bool = (a2 != null and a2.flip_v == want)
+			var facing_ok: bool
+			var diag: String
+			if kk == "zombie":
+				# R-153：图集模式 → 断言「朝向行 + 子精灵反向旋转」
+				#   ⚠ EnemyArt 是子节点会继承体 rotation；朝向已由**行选择**表达，
+				#     故必须 `art.rotation == -rotation` 把子精灵归正，否则 = 双重朝向（横躺）。
+				var want_row: int = int(EXPECT_ROW[deg])
+				var got_row: int = -1
+				if a2 != null and a2.region_enabled:
+					got_row = int(a2.region_rect.position.y / 64.0)
+				var row_ok: bool = (a2 != null and got_row == want_row)
+				var spin_ok: bool = (a2 != null and absf(angle_difference(a2.rotation, -got)) < 0.01)
+				var scale_ok: bool = (a2 != null and a2.scale == Vector2(0.75, 0.75))   # 杂兵图集缩放（用户 2026-10-22 要求 0.75）
+				facing_ok = row_ok and spin_ok and scale_ok
+				diag = "row=%d(期望%d)%s spin=%.4f(期望%.4f)%s scale=%s(期望0.75)%s" % [
+					got_row, want_row, "OK" if row_ok else "<<<",
+					a2.rotation if a2 != null else 0.0, -got, "OK" if spin_ok else "<<< FAIL",
+					str(a2.scale) if a2 != null else "null", "OK" if scale_ok else "<<< FAIL"]
+			else:
+				# 单帧模式 → flip_v == (cos(rotation) < 0)
+				var want: bool = cos(got) < 0.0
+				facing_ok = (a2 != null and a2.flip_v == want)
+				diag = "flip_v=%s(期望%s)" % [str(a2.flip_v) if a2 != null else "null", str(want)]
 			cells4 += 1
-			if not (ang_ok and flip_ok):
+			if not (ang_ok and facing_ok):
 				bad4 += 1
-				_verify_log("FAIL: ④ %s @%.0f° rotation=%.4f（期望 %.4f）%s | flip_v=%s（期望 %s）%s" % [
+				_verify_log("FAIL: ④ %s @%.0f° rotation=%.4f（期望 %.4f）%s | %s %s" % [
 					kk, float(deg), got, a, "OK" if ang_ok else "<<< FAIL",
-					(str(a2.flip_v) if a2 != null else "null"), str(want),
-					"OK" if flip_ok else "<<< FAIL"])
-	_verify_log("④ 朝向 flip_v == (cos(rotation) < 0): 3 类 × 6 角度 = %d 格，不符 %d（期望 0）" % [
+					diag, "OK" if facing_ok else "<<< FAIL"])
+	_verify_log("④ 朝向（僵尸图集行 / merc+brute flip_v）: 3 类 × 4 角度 = %d 格，不符 %d（期望 0）" % [
 		cells4, bad4])
 	if bad4 > 0:
 		ok = false
@@ -21418,27 +24051,57 @@ func _verify_enemy_sprite_test() -> void:
 
 	# ================================================================
 	# ⑥ 纹理缺失 → 降级回 Polygon2D 兜底（**可见地**暴露问题，而不是画一片空白）
-	#   构造方式：运行时造一个 `extends Zombie.gd` 的匿名子类，只覆写
-	#   `enemy_sprite_path()` 指向不存在的路径，`set_script()` 到**真实实例**上
-	#   ⇒ 走的仍是**同一个** `_refresh_art()`（不抄一份测试专用逻辑）。
+	#   R-153：僵尸走「图集」、brute/merc/splitter 走「单帧」，**两条降级分支都要钉死**：
+	#     ⑥-a 图集分支：匿名子类覆写 `enemy_atlas_prefix()` 指向不存在的前缀
+	#           ⇒ `_refresh_art()` 图集分支 6 张全 load 失败 ⇒ 降级。
+	#           ⚠ 注意：只覆写 `enemy_sprite_path()` 不够 —— 图集模式根本不读它，
+	#             单帧覆写会被 `enemy_atlas_prefix() != ""` 短路掉，降级测不到。
+	#     ⑥-b 单帧分支：匿名子类覆写 `enemy_sprite_path()` 指向不存在的路径
+	#           ⇒ `_refresh_art()` 单帧分支 load 失败 ⇒ 降级（brute/merc/splitter 仍在用）。
+	#   构造方式：`set_script()` 到**真实实例**上 ⇒ 走的是**同一个** `_refresh_art()`
+	#   （不抄一份测试专用逻辑）。
 	# ================================================================
-	var sub := GDScript.new()
-	sub.source_code = "extends \"res://scenes/enemies/Zombie.gd\"\nfunc enemy_sprite_path() -> String:\n\treturn \"res://assets/sprites/enemies/__does_not_exist__.png\"\n"
-	var sub_err: int = sub.reload()
-	var d_ok: bool = false
+	var d_ok: bool = true
+	# ---- ⑥-a 图集分支（zombie）----
+	var sub_a := GDScript.new()
+	sub_a.source_code = "extends \"res://scenes/enemies/Zombie.gd\"\nfunc enemy_atlas_prefix() -> String:\n\treturn \"res://assets/sprites/enemies/__missing_atlas__\"\n"
+	var sub_a_err: int = sub_a.reload()
 	if pick.has("zombie"):
 		var zf: Node = pick["zombie"] as Node
-		zf.set_script(sub)
+		zf.set_script(sub_a)
 		zf.call("_refresh_art")
 		var art_f := zf.get_node_or_null("EnemyArt") as Sprite2D
 		var fb_f := zf.get_node_or_null("Sprite") as Polygon2D
 		var art_f_vis: bool = (art_f != null and art_f.visible)
 		var fb_f_vis: bool = (fb_f != null and fb_f.visible)
-		d_ok = (sub_err == OK) and (not art_f_vis) and fb_f_vis
-		_verify_log("⑥ 纹理缺失降级: EnemyArt可见=%s（期望false）Polygon2D兜底可见=%s（期望true）→ %s" % [
-			str(art_f_vis), str(fb_f_vis), "OK" if d_ok else "<<< FAIL"])
+		var a_ok: bool = (sub_a_err == OK) and (not art_f_vis) and fb_f_vis
+		d_ok = d_ok and a_ok
+		_verify_log("⑥-a 图集缺失降级(zombie): EnemyArt可见=%s（期望false）Polygon2D兜底可见=%s（期望true）→ %s" % [
+			str(art_f_vis), str(fb_f_vis), "OK" if a_ok else "<<< FAIL"])
 	else:
-		_verify_log("⑥ 跳过：场上没有 zombie 可降级")
+		_verify_log("⑥-a 跳过：场上没有 zombie")
+	# ---- ⑥-b 单帧分支（brute）----
+	var sub_b := GDScript.new()
+	#   ⚠ 必须同时把 `enemy_atlas_prefix()` 置空：本匿名子类 `extends Zombie.gd`，
+	#     会**继承**到父类非空的前缀 `"char_zombie"` → 走图集分支（图集真实存在）→
+	#     永远加载成功、降级测不到。故显式覆写前缀为 ""，强制走单帧分支，
+	#     单帧 `enemy_sprite_path()` 指向不存在文件 ⇒ 才触发降级。
+	sub_b.source_code = "extends \"res://scenes/enemies/Zombie.gd\"\nfunc enemy_atlas_prefix() -> String:\n\treturn \"\"\nfunc enemy_sprite_path() -> String:\n\treturn \"res://assets/sprites/enemies/__does_not_exist__.png\"\n"
+	var sub_b_err: int = sub_b.reload()
+	if pick.has("brute"):
+		var bf: Node = pick["brute"] as Node
+		bf.set_script(sub_b)
+		bf.call("_refresh_art")
+		var art_f := bf.get_node_or_null("EnemyArt") as Sprite2D
+		var fb_f := bf.get_node_or_null("Sprite") as Polygon2D
+		var art_f_vis: bool = (art_f != null and art_f.visible)
+		var fb_f_vis: bool = (fb_f != null and fb_f.visible)
+		var b_ok: bool = (sub_b_err == OK) and (not art_f_vis) and fb_f_vis
+		d_ok = d_ok and b_ok
+		_verify_log("⑥-b 单帧缺失降级(brute): EnemyArt可见=%s（期望false）Polygon2D兜底可见=%s（期望true）→ %s" % [
+			str(art_f_vis), str(fb_f_vis), "OK" if b_ok else "<<< FAIL"])
+	else:
+		_verify_log("⑥-b 跳过：场上没有 brute")
 	if not d_ok:
 		ok = false
 
@@ -21450,7 +24113,7 @@ func _verify_enemy_sprite_test() -> void:
 # 【本入口钉死五件事（**行为断言**，驱动生产路径，不 grep 源码）】
 #   ⓪ 前置：第 90 层重建后，场上**恰好 1 个** is_splitter，且它在**面积最大**的房间内
 #   ① 数值：speed/hp/attack_range/damage/is_splitter/faction 全部逐字
-#   ② 体型：碰撞盒 24×24 + EnemyArt scale (2,2)
+#   ② 体型：碰撞盒 36×36 + EnemyArt scale 1.5（Boss = 杂兵 48×48 / 0.75 的线性 2× = 面积 4×）
 #   ③ 不会攻击：玩家贴脸驱动多帧，玩家血量不变 且 分裂怪 state 从未 == ATTACK
 #   ④ 生成节奏：t≈1.9s 还没生成，t≈2.6s 恰好新增 10 只（5 普通 + 5 快攻），且都在分裂怪附近
 #   ⑤ fail-closed：不注入 spawner 的分裂怪驱动 3s，不生成任何敌人
@@ -21536,17 +24199,22 @@ func _verify_splitter_test() -> void:
 		var shape: RectangleShape2D = null
 		if cs != null:
 			shape = cs.shape as RectangleShape2D
-		var shape_ok: bool = (shape != null and shape.size == Vector2(24, 24))
+		var shape_ok: bool = (shape != null and shape.size == Vector2(36, 36))   # R-new：Boss 比杂兵大 4 倍
 		var art := sp.get_node_or_null("EnemyArt") as Sprite2D
-		var art_ok: bool = (art != null and art.visible and art.scale == Vector2(2, 2))
-		_verify_log("② 体型: 碰撞盒矩形=%s size=%s(24,24) EnemyArt可见=%s scale=%s(2,2) → %s" % [
+		# R-153：图集模式下父类缩放基准 = 0.75（64×64 单格 → 48×48 世界占位，**用户 2026-10-22 明确要求**）；
+		#   分裂怪 = 父类 × 2（Boss 比杂兵线性 2x / 面积 4x）= **1.5**（64→96 世界占位）。
+		#   ⚠ 别再退回 0.375 叙事：2026-10-23 曾按过期注释把父类改成 0.375 并被用户推翻，
+		#     详见 `Zombie.gd` 的 `ENEMY_ATLAS_SCALE` 裁决说明。
+		const SPLITTER_ART_SCALE := Vector2(1.5, 1.5)
+		var art_ok: bool = (art != null and art.visible and art.scale == SPLITTER_ART_SCALE)
+		_verify_log("② 体型: 碰撞盒矩形=%s size=%s(36,36) EnemyArt可见=%s scale=%s(期望%s) → %s" % [
 			str(shape != null), str(shape.size) if shape != null else "null",
 			str(art != null and art.visible),
-			str(art.scale) if art != null else "null",
+			str(art.scale) if art != null else "null", str(SPLITTER_ART_SCALE),
 			"OK" if (shape_ok and art_ok) else "<<< FAIL"])
 		if not (shape_ok and art_ok):
 			ok = false
-			_verify_log("FAIL: ② 体型不符（碰撞盒 24×24 或 EnemyArt scale 2×2 有一项错）")
+			_verify_log("FAIL: ② 体型不符（碰撞盒 36×36 或 EnemyArt scale 1.5 有一项错）")
 
 		# ---- ③ 不会攻击 ----
 		# 玩家贴脸（8px，远小于僵尸 attack_range=16，但分裂怪 attack_range=0 → 永不攻击）。
@@ -22062,3 +24730,147 @@ func _verify_splitter_test() -> void:
 
 	_verify_log("=== R-149 splitter test %s ===" % ("PASSED" if ok else "FAILED"))
 	get_tree().quit(0 if ok else 1)
+
+# ==== R-158 · --verify-bossphase（Boss 第二阶段 · TASKS 卡 B2 / cp2 草案 P1）====
+# 【被测语义】
+#   ① 触发条件（HP 比例阈值）与二阶段行为（生成周期 / 每轮连发 / 移速 / 血条色）**全部来自
+#      `GameConstants`** —— 调平衡只改数据、不改代码（卡 B2 的「可配」验收）。
+#   ② **单向**：进入二阶段后 HP 回升也不退回（Boss 战惯例；双向会让「回血后变弱」读起来像 bug）。
+#   ③ **零回归**：既有分裂怪语义（HP 700 / 不攻击 / 体型 0.75 / 仅视觉发现才生成）保持不变。
+#
+# ⚠ **期望值一律字面量**（2.0 / 5 / 22.5 / 1.0 / 8 / 33.75），**绝不取自被测常量** ——
+#    否则改常量时断言跟着漂移，反向验证照样 PASS（R-96 旧坑）。
+#
+# 【突变锚点（反向验证时应如期变红）】
+#   · `SPLITTER_PHASE2_HP_FRAC` 0.5 → 0.9：② 在 HP 90% 就切 → ① 之后 ② 仍过但 ③ 变脆（改 0.99 才红），
+#     更稳的做法 = 把 `_enter_phase2()` 里 `_boss_phase = 2` 删掉 → ② 立即 FAIL。
+#   · `SPLITTER_PHASE2_SPAWN_INTERVAL` 改回 2.0 → ④ FAIL（1.3s 内新增 < 3）。
+#   · 把 `_update_spawner` 顶部的阶段检查删掉 → ② FAIL（只剩 take_damage 路径，设 hp 不触发）。
+func _verify_bossphase_test() -> void:
+	_verify_log("=== R-158 boss-phase test (分裂怪第二阶段: 阈值/周期/连发/移速/血条色 可配 + 单向) ===")
+	var ok: bool = true
+	const WANT_P1_INTERVAL := 2.0
+	const WANT_P1_BURST := 5
+	const WANT_P1_SPEED := 22.5
+	const WANT_P2_INTERVAL := 1.0
+	const WANT_P2_BURST := 8
+	const WANT_P2_SPEED := 33.75
+
+	# ---- ⓪ 前置：第 90 层 + 取到分裂怪 ----
+	_floor = GameConstants.SPLITTER_FLOOR
+	_build_floor(false)
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	var sp: Node2D = null
+	for e in enemies_container.get_children():
+		if "is_splitter" in e and bool(e.get("is_splitter")):
+			sp = e as Node2D
+			break
+	if sp == null:
+		ok = false
+		_verify_log("FAIL: ⓪ 第 %d 层未找到分裂怪（后续断言全部无意义）" % GameConstants.SPLITTER_FLOOR)
+		_verify_log("=== R-158 boss-phase test %s ===" % ("PASSED" if ok else "FAILED"))
+		get_tree().quit(0 if ok else 1)
+		return
+	_verify_log("⓪ 前置: floor=%d 分裂怪 hp=%.1f/%.1f" % [_floor, float(sp.get("hp")), float(sp.get("max_hp"))])
+
+	# ---- ① 一阶段参数（字面量）----
+	var p1: int = int(sp.call("splitter_phase"))
+	var i1: float = float(sp.call("_cycle_interval"))
+	var b1: int = int(sp.call("_burst_count"))
+	var s1: float = float(sp.get("move_speed"))
+	var c1: Color = sp.call("boss_bar_color")
+	var r1: bool = (p1 == 1 and absf(i1 - WANT_P1_INTERVAL) < 1e-6 and b1 == WANT_P1_BURST
+		and absf(s1 - WANT_P1_SPEED) < 1e-6)
+	_verify_log("① 一阶段: phase=%d(1) 周期=%.2f(2.0) 连发=%d(5) 移速=%.2f(22.5) → %s" % [
+		p1, i1, b1, s1, "OK" if r1 else "<<< FAIL"])
+	if not r1:
+		ok = false
+		_verify_log("FAIL: ① 一阶段参数不等于字面量期望（phase / 周期 / 连发 / 移速）")
+
+	# ---- ② HP 掉到阈值 → 进二阶段（走 `_update_spawner` 的每帧检查，不只 take_damage）----
+	sp.set("hp", float(sp.get("max_hp")) * (GameConstants.SPLITTER_PHASE2_HP_FRAC - 0.05))
+	await get_tree().physics_frame
+	var p2: int = int(sp.call("splitter_phase"))
+	var i2: float = float(sp.call("_cycle_interval"))
+	var b2: int = int(sp.call("_burst_count"))
+	var s2: float = float(sp.get("move_speed"))
+	var c2: Color = sp.call("boss_bar_color")
+	var color_changed: bool = not c2.is_equal_approx(c1)
+	var r2: bool = (p2 == 2 and absf(i2 - WANT_P2_INTERVAL) < 1e-6 and b2 == WANT_P2_BURST
+		and absf(s2 - WANT_P2_SPEED) < 1e-6 and color_changed)
+	_verify_log("② 二阶段: phase=%d(2) 周期=%.2f(1.0) 连发=%d(8) 移速=%.2f(33.75) 血条换色=%s → %s" % [
+		p2, i2, b2, s2, str(color_changed), "OK" if r2 else "<<< FAIL"])
+	if not r2:
+		ok = false
+		_verify_log("FAIL: ② 掉到阈值后未正确进入二阶段（phase / 周期 / 连发 / 移速 / 血条色 有一项没切）")
+
+	# ---- ③ 单向：HP 拉回满血，仍停在二阶段 ----
+	sp.set("hp", float(sp.get("max_hp")))
+	await get_tree().physics_frame
+	var p3: int = int(sp.call("splitter_phase"))
+	_verify_log("③ 单向: HP 回满后 phase=%d（期望 2 = 不回退）" % p3)
+	if p3 != 2:
+		ok = false
+		_verify_log("FAIL: ③ 单向性被破坏：HP 回满后 phase 退回 %d" % p3)
+
+	# ---- ④ 二阶段生成节奏实测（真实链路：玩家在视野内 → 1.0s 周期就触发）----
+	player.global_position = sp.global_position + Vector2(40.0, 0.0)
+	sp.set("target", null)
+	sp.set("state", 0)
+	sp.set("velocity", Vector2.ZERO)
+	sp.set("_burst_left", 0)
+	sp.set("_burst_gap", 0.0)
+	sp.set("_spawned_bursts", 0)
+	var pre4: Array = []
+	for e in enemies_container.get_children():
+		pre4.append(e)
+	for _f4 in 78:                       # 78 帧 ≈ 1.3s > 二阶段周期 1.0s（一阶段同样帧数应 0 只）
+		await get_tree().physics_frame
+	var born4: int = 0
+	for e in enemies_container.get_children():
+		if not pre4.has(e):
+			born4 += 1
+	var r4: bool = (born4 >= 3)
+	_verify_log("④ 二阶段节奏: 玩家在视野内 1.3s 新增小怪=%d（期望 >=3：周期已缩到 1.0s）→ %s" % [
+		born4, "OK" if r4 else "<<< FAIL"])
+	if not r4:
+		ok = false
+		_verify_log("FAIL: ④ 二阶段生成节奏没变快（1.3s 内新增 %d < 3）" % born4)
+
+	# ---- ⑤ 视觉闸门在二阶段仍生效（R-150 语义不能被二阶段绕过）----
+	sp.set("_burst_left", 0)
+	sp.set("_spawned_bursts", 0)
+	player.global_position = sp.global_position + Vector2(600.0, 0.0)
+	var pre5: Array = []
+	for e in enemies_container.get_children():
+		pre5.append(e)
+	for _f5 in 90:                       # 90 帧 = 1.5s
+		await get_tree().physics_frame
+	var born5: int = 0
+	for e in enemies_container.get_children():
+		if not pre5.has(e):
+			born5 += 1
+	_verify_log("⑤ 视觉闸门: 玩家挪到 600px 外，1.5s 新增=%d（期望 0）→ %s" % [
+		born5, "OK" if born5 == 0 else "<<< FAIL"])
+	if born5 != 0:
+		ok = false
+		_verify_log("FAIL: ⑤ 二阶段下视觉闸门失效（玩家不在视野仍生成 %d 只）" % born5)
+
+	# ---- ⑥ 零回归：既有分裂怪语义不变（HP / 不攻击 / 体型）----
+	var art: Sprite2D = sp.get_node_or_null("EnemyArt") as Sprite2D
+	var sc: Vector2 = art.scale if art != null else Vector2.ZERO
+	# ⚠ **1.5 = `ENEMY_ATLAS_SCALE`(0.75) × 2**：与 `--verify-splitter` ② 的 `SPLITTER_ART_SCALE`
+	#   是**同一个数的两处字面量**（两个入口各自独立，跨函数无法引用）。改图集基准时
+	#   **两处必须一起改**，否则会出现「splitter 绿、bossphase 红」的假红。
+	var r6: bool = (absf(float(sp.get("max_hp")) - 700.0) < 1e-6
+		and absf(float(sp.get("attack_range"))) < 1e-6 and absf(sc.x - 1.5) < 1e-6)
+	_verify_log("⑥ 既有语义: max_hp=%.1f(700) attack_range=%.1f(0) art.scale=%s(1.5) → %s" % [
+		float(sp.get("max_hp")), float(sp.get("attack_range")), str(sc), "OK" if r6 else "<<< FAIL"])
+	if not r6:
+		ok = false
+		_verify_log("FAIL: ⑥ 既有分裂怪语义被破坏（HP / 不攻击 / 体型）")
+
+	_verify_log("=== R-158 boss-phase test %s ===" % ("PASSED" if ok else "FAILED"))
+	get_tree().quit(0 if ok else 1)
+

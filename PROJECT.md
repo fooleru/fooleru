@@ -41,7 +41,8 @@
   ```bash
   bash qa_scratch/run_all_verify.sh <批号> 67
   ```
-  预期入口数 **67**。跑前会自动查锁、清孤儿 Godot、冻结源文件 md5。
+  预期入口数 **72**（R-158 核对：`ENTRIES` 唯一入口 72 条、零重复；历史基线 r152 是 67/67，
+  之后新增了 corpse 等 5 个入口）。跑前会自动查锁、清孤儿 Godot、冻结源文件 md5。
 - 单入口冒烟：`godot --headless --path . --verify-<name>`（如 `--verify-splitter`、`--verify-loc`）。
 - 世界空间禁文字守护：`godot --headless --path . --verify-loc` 必须 `rc=0`。
 
@@ -52,8 +53,11 @@
 
 三种分摊机制（按推荐度）：
 
-1. **GitHub Actions 跑回归（推荐，几乎不耗本地积分）**——把 headless 回归挂 CI，
-   push 后由 GitHub 免费额度跑出 67/67 报告。见 `TASKS.md` T10。
+1. **GitHub Actions 跑回归（推荐，几乎不耗本地积分）**——已落地 `.github/workflows/regression.yml`，
+   push 到 `origin`(main) 后自动跑全量 headless 回归（windows-latest，复用本地同一份
+   `qa_scratch/run_all_verify.sh`，判据零漂移），报告与日志作为 artifact 上传；
+   也可在 Actions 页手动 `Run workflow`（可填预期入口数 / Godot 版本）。
+   ⚠ **首次 push 前它不会跑**；⚠ 改 ENTRIES 条数须同步改 yml 里的 `EXPECT` 默认值。
 2. **每人本地认领卡**——clone 后在自己账号上改 + 跑对应 `--verify-*`，只对得齐 r152 基线再提 PR。
 3. **重活(生图)外移**——AI 美术放独立机器 `d:\work\ComfyUI`，不占游戏机回归时间（见下「美术线」）。
 
@@ -61,7 +65,7 @@
 
 ## 回归可采信条件（四项必须同时成立）
 
-1. 实际入口数 == 预期（67）；
+1. 实际入口数 == 预期（**72**，见 `run_all_verify.sh` 的 `ENTRIES`）；
 2. 无重复入口；
 3. 无 `????` / NOLOG（即每个入口都跑出了结论）；
 4. `FROZEN-OK`（跑前跑后源文件 md5 一致，证明回归期间没人改源文件）。

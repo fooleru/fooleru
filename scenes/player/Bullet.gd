@@ -11,6 +11,7 @@ class_name Bullet
 var speed := GameConstants.BULLET_SPEED
 var damage := GameConstants.PISTOL_DAMAGE
 var hostile: bool = false        # true = 敌方发射（打玩家/敌对阵营）；false = 玩家发射（打敌人）
+var _col: Color = Color(0.98, 0.85, 0.2, 1.0)   # R-new: 弹体/拖尾颜色（玩家黄；敌弹在 _ready 改红橙）
 var _shooter: Node = null        # 发射者（射线排除，防自伤）
 
 var _vel: Vector2 = Vector2.RIGHT
@@ -24,11 +25,34 @@ func _ready() -> void:
 	body_entered.connect(_on_body_entered)
 	# 阵营分层（R-62）：敌弹 mask=7(墙|玩家|亡灵) → 打玩家与敌对阵营，天然不打同阵营佣兵；
 	#              友弹 mask=13(墙|亡灵|佣兵) → 打两个阵营的敌人
-	collision_mask = 7 if hostile else 13
+	# ⚠ R-155：两档**各加 32**（b 类家具·防弹玻璃）—— 7→39、13→45。
+	#   加 32 的含义：子弹**会被**防弹玻璃挡住（b 类需求：仅视线穿过，子弹不穿）。
+	#   不加 16（家具/箱子层）→ 子弹照旧穿过 c 类家具（货架/铁栅栏/办公桌），与 Crate 语义一致。
+	collision_mask = 39 if hostile else 45
 	if hostile:
 		var sp := get_node_or_null("Sprite")
 		if sp != null:
 			sp.color = Color(1.0, 0.42, 0.22, 1.0)  # 红橙 = 敌方弹（与玩家黄弹区分）
+		_col = Color(1.0, 0.42, 0.22, 1.0)          # R-new: 拖尾与弹体同色
+
+# ==== R-new: 拖尾 (tracer) ====
+# 沿 local -X（子弹已按速度方向 set rotation，-X 即"向后"）画一条渐隐锥形尾迹。
+# 固定形状随节点每帧位移/旋转一起渲染 -> 无需历史缓冲、无需逐帧 queue_redraw。
+# 长度随速度缩放（约 1 帧位移）：玩家 1200->~20px，佣兵 420->~7px。
+# 用 draw_line（非 draw_string）-> 不触发 R-128 世界空间禁文字 guard。
+# 父 _draw 先于子 Sprite 渲染 -> 尾迹在后、弹体头在前。
+func _draw() -> void:
+	var trail_len: float = speed / 60.0
+	var segs: int = 6
+	var i: int = 0
+	while i < segs:
+		var t0: float = float(i) / float(segs)
+		var t1: float = float(i + 1) / float(segs)
+		var a: float = 0.5 * (1.0 - t0)
+		var w: float = 2.0 * (1.0 - t0) + 0.3
+		draw_line(Vector2(-trail_len * t0, 0.0), Vector2(-trail_len * t1, 0.0),
+			Color(_col.r, _col.g, _col.b, a), w)
+		i += 1
 
 # 发射者（射线排除自身，防子弹生成在自己体内即自毁）
 func set_shooter(n: Node) -> void:

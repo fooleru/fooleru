@@ -17,4 +17,4 @@ shape = SubResource("circle_b")
 
 [node name="Sprite" type="Polygon2D" parent="."]
 color = Color(0.98, 0.85, 0.2, 1)
-polygon = PackedVector2Array(-2, -2, 2, -2, 2, 2, -2, 2)
+polygon = PackedVector2Array(-1, -1, 1, -1, 1, 1, -1, 1)

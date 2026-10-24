@@ -39,13 +39,13 @@
 | ID | 标题 | 依赖 | 验收标准 | 负责人槽 | 积分 |
 |----|------|------|----------|----------|------|
 | E1 | 回归脚本工程化 | r152 | `run_all_verify.sh` 的 ENTRIES 入口表改为声明式清单，降低改脚本风险；r153 仍 67/67 | QA | 🔴 |
-| E2 | **GitHub Actions 跑 headless 回归** | E1 | push 后 Action 自动跑出 67/67 报告（**用 GitHub 免费额度，几乎不耗本地积分**） | CI | 🔴 |
+| E2 | **GitHub Actions 跑 headless 回归** ✅已落地 | E1 | `.github/workflows/regression.yml` 已写（windows-latest + 复用同一份 `run_all_verify.sh`）；**首次 push 到 origin 后自动生效**——push 后 Action 应跑出全绿报告（**用 GitHub 免费额度，几乎不耗本地积分**）。⚠ 改 ENTRIES 条数时**必须同步改**该 yml 的 `EXPECT` 默认值 | CI | 🔴 |
 
 ## 工作流 F · 文档 / 工具
 
 | ID | 标题 | 依赖 | 验收标准 | 负责人槽 | 积分 |
 |----|------|------|----------|----------|------|
-| F1 | 第2章范围评审 | TASKS 稳定 | `cp2_scope.md` → 拆成 cp2 任务卡草案 | 策划 | 🟢 |
+| F1 | 第2章范围评审 ✅草案已出 | TASKS 稳定 | `design/cp2_tasks_draft.md` v0.1（对账：cp2 §2 的 19 项**全部已落地**；3 项「推迟」实际已提前落地；P1–P11 候选卡 + T1 技术债）→ **待用户拍板后升为正式卡** | 策划 | 🟢 |
 | F2 | 多语言结构落地 | r152 | `Loc` 已留结构；加一种语言仅加一张表 + `SUPPORTED` 登记，调用点零改动 | 本地化 | 🟢 |
 
 ---

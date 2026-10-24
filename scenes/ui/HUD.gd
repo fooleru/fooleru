@@ -25,13 +25,27 @@ signal restart_pressed
 @onready var hunger_bar: ColorRect = $Margin/VBox/Hunger/HungerBar
 @onready var thirst_track: ColorRect = $Margin/VBox/Thirst/ThirstTrack
 @onready var thirst_bar: ColorRect = $Margin/VBox/Thirst/ThirstBar
-@onready var ammo_track: ColorRect = $Margin/VBox/Ammo/AmmoTrack
-@onready var ammo_bar: ColorRect = $Margin/VBox/Ammo/AmmoBar
-@onready var reserve_track: ColorRect = $Margin/VBox/Reserve/ReserveTrack
-@onready var reserve_bar: ColorRect = $Margin/VBox/Reserve/ReserveBar
+@onready var ammo_track: ColorRect = $Margin/Ammo/AmmoTrack
+@onready var ammo_bar: ColorRect = $Margin/Ammo/AmmoBar
+@onready var reserve_track: ColorRect = $Margin/Reserve/ReserveTrack
+@onready var reserve_bar: ColorRect = $Margin/Reserve/ReserveBar
 @onready var overload_bg: ColorRect = $Margin/VBox/Load/OverloadBg
-@onready var floor_label: Label = $Margin/VBox/Floor/FloorLabel
+@onready var floor_label: Label = $Margin/Floor/FloorLabel
 
+# ==== R-new（2026-10-21）UI 布局常量 ====
+# 【坐标空间】本 HUD 画在 **320×180 设计空间**（实际视口 640×360，靠 Main._apply_ui_scale
+#   的 UI_SCALE=2 整体放大）—— 下列坐标全是**设计空间**，换分辨率时 UI_SCALE 自动跟随。
+# 【布局意图】
+#   · 左上：状态组（HP/体力/负重/饥饿/口渴，仍在 VBox 内自动排布）
+#   · 左上组下方：楼层标签 F100（脱离 VBox 独立定位）
+#   · 右下：弹匣条 + 备弹条（**视线附近**，且避开右下角的 F100 返回按钮与左下技能键）
+#   · 右上：迷你地图（144×96 实际，= 相对旧 96×64 精确 +50%）
+# 【冲突核对（设计空间）】状态组 x≤60 / 迷你地图 x≥238 / 弹匣条 x∈[256,312] y=136
+#   / 楼层标签 y=44 / 技能键 (0,156) / 返回按钮 (282,150) —— 两两不重叠。
+const LAYOUT_AMMO_POS := Vector2(256.0, 136.0)      # 弹匣条（Margin 局部）
+const LAYOUT_RESERVE_POS := Vector2(256.0, 143.0)   # 备弹条（弹匣条下方 3+1 px）
+const LAYOUT_FLOOR_POS := Vector2(0.0, 44.0)        # 楼层标签（状态组下方）
+const LAYOUT_MINIMAP_MARGIN := 2.0                 # 迷你地图距右边缘
 const BAR_W := 56.0            # 色条总宽
 const FILL_W := 44.8           # 负重「满槽(=CarryCapacity)」刻度位置 = BAR_W*0.8
 const OVER_W := 11.2           # 负重溢出区 = BAR_W*0.2（load ratio 1.0..1.2）
@@ -84,10 +98,53 @@ var _regen_state: int = 99
 #   （R-80 起就是单向数据流 Main → HUD）。存 Callable 保留了"数据只进不出"的方向性：
 #   HUD 只能**问**状态，不能**改**状态。
 var _regen_state_fn: Callable = Callable()
+var _minimap_view: MinimapView = null    # R-new：右上角迷你地图
+var _skill_view: SkillButtonView = null   # R-new：左下角 V 技能按钮 + 扇形冷却
 
 func _ready() -> void:
 	_set_all_bar_sizes()
 	_make_mouse_transparent(self)
+	# R-new：右上角迷你地图 + 左下角 V 技能按钮（代码 new 子 Node2D，不动 HUD.tscn）
+	_minimap_view = MinimapView.new()
+	_minimap_view.name = "MinimapView"
+	# ⚠⚠ R-new（2026-10-21）：**挂到 Margin 下**（此前挂 HUD 直系子）——
+	#   HUD 是 CanvasLayer，Margin 才是被 Main._apply_ui_scale 缩放的那一层；
+	#   挂 HUD 下 = 小地图**不参与统一缩放**（实际 96×64，与其它 UI 不同比例）。
+	#   挂 Margin 下 → 继承 UI_SCALE → 实际 144×96（= 相对旧 96×64 精确 +50%）。
+	add_child(_minimap_view)
+	var _margin := get_node("Margin") as Control
+	if _margin != null:
+		_minimap_view.get_parent().remove_child(_minimap_view)
+		_margin.add_child(_minimap_view)
+	# 独立定位的三个元素（脱离 VBoxContainer 自动排布）
+	ammo_track.get_parent().position = LAYOUT_AMMO_POS
+	reserve_track.get_parent().position = LAYOUT_RESERVE_POS
+	floor_label.get_parent().position = LAYOUT_FLOOR_POS
+	_skill_view = SkillButtonView.new()
+	_skill_view.name = "SkillButtonView"
+	_skill_view.position = Vector2(4.0, 180.0 - 16.0 - 4.0)   # 左下角
+	add_child(_skill_view)
+
+# R-new：迷你地图数据（cells: 0=未探索 1=地面 2=墙；player=玩家小地图格）。由 Main 推送。
+func set_minimap(cells: PackedByteArray, cols: int, rows: int, player: Vector2i,
+		exit_cell: Vector2i, crate_cells: Array, enemy_cells: Array) -> void:
+	if _minimap_view == null:
+		return
+	# 右对齐：框宽 = cols × MinimapView.CELL_PX（**Margin 局部坐标**，随 Margin 一起缩放）
+	#   Margin 宽 312（offset_right=316，自身 position=(4,4)）→ 右边缘在局部 x=312
+	var _m: Control = _minimap_view.get_parent() as Control
+	var _m_w: float = 312.0 if _m == null else _m.size.x
+	_minimap_view.position = Vector2(_m_w - float(cols) * MinimapView.CELL_PX - LAYOUT_MINIMAP_MARGIN, 0.0)
+	_minimap_view.set_data(cells, cols, rows, player, exit_cell, crate_cells, enemy_cells)
+
+func clear_minimap() -> void:
+	if _minimap_view != null:
+		_minimap_view.clear_data()
+
+# R-new：V 技能（视野扫描）冷却比例：0=就绪 .. 1=刚放完。由 Main 每帧推送。
+func set_scan_cd(ratio: float) -> void:
+	if _skill_view != null:
+		_skill_view.set_cd(ratio)
 
 # R-68：HUD 是纯显示层，全部 Control 设为 MOUSE_FILTER_IGNORE。
 # 否则默认的 STOP 会在 GUI 命中阶段「吃掉」点击 → 背包 / 箱子的拖拽与 Ctrl 快移全部失效。

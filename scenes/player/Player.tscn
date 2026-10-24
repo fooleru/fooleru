@@ -7,7 +7,7 @@ points = PackedVector2Array(6.44, 0, -3.22, 2.59, -3.22, -2.59)
 
 [node name="Player" type="CharacterBody2D"]
 collision_layer = 2
-collision_mask = 17
+collision_mask = 49   ; R-155: 17(墙1+家具16) +32 = b类家具(防弹玻璃)也挡玩家
 motion_mode = 1
 script = ExtResource("1_player")
 

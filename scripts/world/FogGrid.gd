@@ -16,6 +16,20 @@ var _cols: int = 0
 var _rows: int = 0
 var _floor_index: int = -999999
 var _offsets: Array = []             # 半径内的格偏移（预计算）
+var _edge_offsets: Dictionary = {}   # R-new（2026-10-22）：可见圈外过渡环偏移 → alpha（预计算）
+var _last_pt: Vector2i = Vector2i(-1, -1)   # R-new：最近一次 update_visibility 的玩家格（edge_fade 用）
+
+# ==== R-new（2026-10-18）：已生成楼层账本 ====
+# 出发点「楼层选择」面板的数据源：凡本进程里 `set_floor` 绑定过的楼层都在 `_cache`
+#   里（`_build_floor` 每层必调）→ 键集合就是「已经生成过的楼层地图」。
+# ⚠ 返回**未排序**的 int 数组：楼层号语义（降序/只列战斗层）在 Main 侧处理，
+#   本文件不引入 GameConstants 楼层规则（保持 FogGrid 是纯网格存储）。
+# ⚠ 与 `clear_cache()`（R-112 换层全清）联动：清了就都没有 —— 语义自洽。
+func visited_floors() -> Array:
+	var out: Array = []
+	for k in _cache.keys():
+		out.append(int(k))
+	return out
 
 # 绑定楼层：首次遇到该 floor_index → 新建全「未探索」；已缓存 → 直接加载（已探索不丢）
 func set_floor(grid: PackedByteArray, cols: int, rows: int, floor_index: int) -> void:
@@ -37,10 +51,23 @@ func set_floor(grid: PackedByteArray, cols: int, rows: int, floor_index: int) ->
 func _build_offsets() -> void:
 	var r: int = GameConstants.FOG_VISION_RADIUS_TILES
 	_offsets = []
-	for dy in range(-r, r + 1):
-		for dx in range(-r, r + 1):
-			if dx * dx + dy * dy <= r * r:
-				_offsets.append(Vector2i(dx, dy))
+	# ==== R-new（2026-10-22）：可见圈外过渡环（视野边缘软过渡）====
+	# 环 = 距离 ∈ (r, r + FOG_EDGE_FADE_TILES]，alpha 从 ~0 线性增到 FOG_EDGE_FADE_ALPHA
+	#   ⇒ 渲染序列「可见(0) → 过渡环(渐升) → 已探索(0.55)」自然衔接，无硬边。
+	var fade: int = GameConstants.FOG_EDGE_FADE_TILES
+	var end_a: float = GameConstants.FOG_EDGE_FADE_ALPHA
+	_edge_offsets = {}
+	var r2: int = r * r
+	var m2: int = (r + fade) * (r + fade)
+	for dy in range(-(r + fade), (r + fade) + 1):
+		for dx in range(-(r + fade), (r + fade) + 1):
+			var d2: int = dx * dx + dy * dy
+			if d2 <= r2:
+				_offsets.append(Vector2i(dx, dy))            # 圈内：常态 LOS 可见判定
+			elif d2 <= m2:
+				# 圈外过渡环：dist ∈ (0, fade] → alpha = end_a × dist/fade（首环 ≈ end_a/3）
+				var k: float = (sqrt(float(d2)) - float(r)) / float(fade) if fade > 0 else 1.0
+				_edge_offsets[Vector2i(dx, dy)] = end_a * k
 
 # ==== R-147：V 键「视野扫描」—— 无视遮挡地把半径内网格升为「已探索」====
 # 【与 `update_visibility` 的分工】（二者**不可互换**，语义相反）
@@ -68,6 +95,45 @@ func reveal_radius(center_tile: Vector2i, radius_tiles: int) -> int:
 			var t: Vector2i = center_tile + Vector2i(dx, dy)
 			if t.x < 0 or t.x >= _cols or t.y < 0 or t.y >= _rows:
 				continue
+			var i: int = t.y * _cols + t.x
+			if int(_tiles[i]) < GameConstants.FOG_EXPLORED:
+				_tiles[i] = GameConstants.FOG_EXPLORED
+				revealed += 1
+	return revealed
+
+# ==== R-new（2026-10-22）：正方形揭示（准星探图用）====
+# 与 `reveal_radius`（欧氏圆盘）不同，这里揭示以 center 为中心的 **切比雪夫方形**邻域
+#   （半径 r ⇒ (2r+1)×(2r+1) 全格），更贴合「准星周围一小块区域」的直觉。
+# 语义：**只升不降**（已探索永不回退）。
+#
+# 【遮挡判定（传入 from_tile 时）——判据与边界情况】
+#   判据 = `_line_clear(from_tile, t)`：从视线源(玩家格)到目标格 t 走 **Bresenham 中心线**，
+#     直线上「中间格」任一为墙(`_terrain==0`) → 判为遮挡，不揭示。
+#   ① 部分遮挡：**逐格二元**（整格揭示 or 不揭示），依中心线判定；贴墙角「露一点头」的边缘格
+#      若中心线擦到墙 → 判为遮挡（**保守**：宁可少露，不漏露）。
+#   ② 拐角：对角处 Bresenham 只经过一格中间点；该点/墙角是墙 → 挡，否则通
+#      （能沿一条不穿墙的直线看到才揭示，不能隔角偷看）。
+#   ③ 多障碍物叠加：**任一**中间墙即挡（二元、无累积衰减；两堵墙与一堵墙等效）。
+#   ④ 墙本身：终点豁免 → **看得到的墙格会揭示**（看得见墙面）；但墙**后**的格被挡。
+#   ⑤ 视线源豁免：玩家所在格不参与遮挡判定。
+#   ⑥ 越界：跳过（不揭示、不崩）。
+#   传无效 from_tile（默认 -999999）→ 不做遮挡（向后兼容 V 键扫描等旧语义）。
+func reveal_square(center_tile: Vector2i, radius_tiles: int, from_tile: Vector2i = Vector2i(-999999, -999999)) -> int:
+	if _cols <= 0 or _rows <= 0 or radius_tiles < 0:
+		return 0
+	# R-new（2026-10-22）：传入有效 from_tile（视线源，通常是玩家格）时，**逐格做 LOS 遮挡**。
+	#   判据 = `_line_clear(from_tile, t)`：Bresenham 直线上的**中间格**若是墙 → 挡；
+	#   起点(玩家格)与终点(被看的格)豁免 → 墙本身可见，墙后的格不可见。
+	#   传无效值（默认）→ 不做遮挡（向后兼容旧调用 / V 键扫描语义）。
+	var use_los: bool = (from_tile.x >= 0 and from_tile.x < _cols and from_tile.y >= 0 and from_tile.y < _rows)
+	var revealed: int = 0
+	for dy in range(-radius_tiles, radius_tiles + 1):
+		for dx in range(-radius_tiles, radius_tiles + 1):
+			var t: Vector2i = center_tile + Vector2i(dx, dy)
+			if t.x < 0 or t.x >= _cols or t.y < 0 or t.y >= _rows:
+				continue
+			if use_los and not _line_clear(from_tile, t):
+				continue          # 视线被墙挡 → 不揭示
 			var i: int = t.y * _cols + t.x
 			if int(_tiles[i]) < GameConstants.FOG_EXPLORED:
 				_tiles[i] = GameConstants.FOG_EXPLORED
@@ -112,6 +178,7 @@ func update_visibility(player_pos: Vector2) -> void:
 	var pt: Vector2i = world_to_tile(player_pos)
 	if pt.x < 0 or pt.x >= _cols or pt.y < 0 or pt.y >= _rows:
 		return
+	_last_pt = pt   # R-new（2026-10-22）：供 edge_fade() 定位过渡环
 	# 1) 上一帧的「可见」降级为「已探索」（0/1 不受影响 → 已探索永不回退为未探索）
 	var i: int = 0
 	while i < _tiles.size():
@@ -129,6 +196,23 @@ func update_visibility(player_pos: Vector2) -> void:
 # === 查询 ===
 func cols() -> int:
 	return _cols
+
+# ==== R-new（2026-10-22）：视野边缘软过渡的渐变量 ====
+# 返回 t 格在「可见圈外过渡环」内应额外承受的黑罩 alpha（0 = 不过渡）。
+#   · 只有过渡环内的格才可能 > 0（圈内=全亮 0；环外=持久态）
+#   · **LOS 门控**：墙后不亮（软的是亮度，不是信息；遮挡语义不变）
+# 供 FogOverlay 烘焙时取 `min(持久alpha, edge_fade)` 实现自然衔接。
+func edge_fade(t: Vector2i) -> float:
+	if _edge_offsets.is_empty() or _tiles.is_empty() or _last_pt.x < 0:
+		return 0.0
+	if t.x < 0 or t.y < 0 or t.x >= _cols or t.y >= _rows:
+		return 0.0
+	var a: float = _edge_offsets.get(t - _last_pt, 0.0)
+	if a <= 0.0:
+		return 0.0
+	if not _line_clear(_last_pt, t):
+		return 0.0                          # 墙后不亮
+	return a
 
 func rows() -> int:
 	return _rows

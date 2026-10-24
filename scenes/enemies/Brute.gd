@@ -65,3 +65,14 @@ var is_brute: bool = true
 ##     ⇒ 换图不引入任何新的形状/朝向回归面。
 func enemy_sprite_path() -> String:
     return ENEMY_SPRITE_DIR + "brute.png"
+
+## R-153：Brute **不走**僵尸图集 —— 显式覆写 `enemy_atlas_prefix()` 返回空串，
+##   退回单帧旧路径（`enemy_sprite_path()` 的 `brute.png`）。
+##   ⚠⚠ **为什么必须覆写这一行**：父类 `Zombie.enemy_atlas_prefix()` 返回 `"char_zombie"`
+##     （非空 = 图集模式）。本文件 `extends Zombie.gd` 会**继承**到这个非空返回值，
+##     于是 Brute 会去加载僵尸图集、丢掉自己的 `brute.png` 单帧图 —— 三向可分线索直接失效
+##     （**这是回归**）。所以这里必须把图集前缀置空，强制走单帧。
+##   ⚠ 对照：`Splitter.gd` **不**覆写本函数 → 继承 `"char_zombie"`（大号僵尸，靠 scale 表达），
+##     那是 R-153 有意的设计；Brute 则保持专属单帧橙褐图。
+func enemy_atlas_prefix() -> String:
+    return ""

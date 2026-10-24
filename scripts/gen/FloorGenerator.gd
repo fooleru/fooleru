@@ -345,9 +345,26 @@ func generate(seed: int, floor: int) -> Dictionary:
 	#   逐层打印的 crates 坐标）会全部漂移。纯哈希让 `crates` 数组**逐字节不变**。
 	#   → 同种子两次生成：坐标**与类型**都完全一致（--verify-cratetype ⑥ 守着这条）。
 	# ⚠ 哈希**必须放在 cguard 之后**（`crates` 可能被兜底删掉尾巴），否则类型数组会与坐标错位。
+	# ⚠⚠ R-new（2026-10-22）：**按房间主题匹配箱子种类**（用户需求）。
+	#   流程：箱子像素坐标 → 所在 tile → 命中哪个房间（Rect2i）→ 该房间的主题
+	#   （room_theme_of 纯哈希）→ 查 ROOM_THEME_CRATE_RULES 拿允许列表 → 哈希选。
+	#   默认策略：不在任何房间内（走廊/大厅）或主题未登记 → 全 4 类（同旧行为）。
+	# ⚠ 仍然**纯哈希、不碰 rng**（R-104 的硬约束不变）⇒ crates 坐标逐字节不变，
+	#   只有**类型分布**随规则改变（这是需求本身的目的）。
 	var crate_kinds: Array = []
 	for ci in crates.size():
-		crate_kinds.append(crate_kind_of(seed, floor, ci))
+		var cp: Vector2 = crates[ci] as Vector2
+		var ct: Vector2i = Vector2i(int(cp.x) / TILE, int(cp.y) / TILE)
+		var allowed: Array = GameConstants.CRATE_TYPE_IDS   # 默认 = 全种类
+		for ri in rooms.size():
+			var rr: Rect2i = rooms[ri] as Rect2i
+			if rr.has_point(ct):
+				var theme: String = room_theme_of(seed, floor, ri)
+				var rule: Array = GameConstants.ROOM_THEME_CRATE_RULES.get(theme, [])
+				if not rule.is_empty():
+					allowed = rule                    # 命中规则 → 收窄到允许列表
+				break                               # 一个箱子只归属一个房间
+		crate_kinds.append(crate_kind_in(seed, floor, ci, allowed))
 	var pickup := spawn
 	var ptries := 0
 	while ptries < 300 and floor_cells.size() > 0:
@@ -360,6 +377,15 @@ func generate(seed: int, floor: int) -> Dictionary:
 
 	var band := _wall_band(grid, cols, rows)
 	var walls := _mesh(band, cols, rows)
+
+	# ==== R-155：给每个小房间定主题 + 摆对应家具 ====
+	# ⚠ 必须在箱子（`crates`）定型之后再摆：家具要避开箱子已占的格子，
+	#   否则会出现"货架压在宝箱上"这种两个实体抢一格的情况。
+	var furniture: Array = _place_furniture(rooms, grid, cols, rows, door_set, path_tiles,
+		spawn, exit_pos, crates, seed, floor)
+	var room_themes: Array = []
+	for ri in rooms.size():
+		room_themes.append(room_theme_of(seed, floor, ri))
 
 	var room_rects: Array[Rect2] = []
 	for r in rooms:
@@ -379,6 +405,10 @@ func generate(seed: int, floor: int) -> Dictionary:
 		#   "food"/"material"）。**与 crates 同下标、同长度**（cguard 可能删掉坐标尾巴，
 		#   所以本数组在 cguard 之后才生成）。由纯哈希决定，不消耗 rng（见上方注释）。
 		"crate_kinds": crate_kinds,
+		# ↓ R-155 新增（**加键不改键**，缺键才会破坏既有 63 个入口）：
+		#   `furniture`  = 家具列表，元素 {id, cat, pos, cell, room, theme}
+		#   `room_themes`= 每房间主题 id，**与 rooms 同下标同长度**
+		"furniture": furniture, "room_themes": room_themes,
 		"cols": cols, "rows": rows, "grid": grid,
 	}
 
@@ -860,3 +890,172 @@ func crate_kind_of(seed: int, floor: int, index: int) -> String:
 	h = h & 0x7FFFFFFF
 	h = h ^ (h >> 16)
 	return GameConstants.CRATE_TYPE_IDS[h % GameConstants.CRATE_TYPE_IDS.size()]
+
+# ==== R-new（2026-10-22）：在**允许列表**里哈希选箱子类型 ====
+# 与 `crate_kind_of` 的差别只在最后一行：候选池从「全部 4 类」换成调用方给的
+#   `allowed`（房间主题匹配出来的合法种类）。混合函数**逐字节相同** ⇒
+#   allowed == CRATE_TYPE_IDS 时与旧实现**逐字节一致**（默认策略零漂移）。
+func crate_kind_in(seed: int, floor: int, index: int, allowed: Array) -> String:
+	if allowed.is_empty():
+		return crate_kind_of(seed, floor, index)      # 防御：空池回退到全种类
+	var h: int = _mix(seed, floor) ^ (int(index) * 0x9E3779B1)
+	h = h & 0x7FFFFFFF
+	h = (h ^ (h >> 16)) * 0x85EBCA6B
+	h = h & 0x7FFFFFFF
+	h = (h ^ (h >> 13)) * 0xC2B2AE35
+	h = h & 0x7FFFFFFF
+	h = h ^ (h >> 16)
+	return String(allowed[h % allowed.size()])
+
+# ==== R-155：房间主题（纯哈希，不消耗 rng）====
+#   为什么不用 rng：房间数量随层数变化，若用 rng，则"第 3 个房间的主题"会随前面
+#   抽取次数漂移（第 5 层与第 6 层房间数不同 → 同种子下列顺序错位）。
+#   用 `(seed, floor, room_index)` 的纯哈希则**同种子同层永远一致**
+#   （与 `crate_kind_of` 同款取舍，`--verify-furniture` 守这条）。
+func room_theme_of(seed: int, floor: int, index: int) -> String:
+	var h: int = _mix(seed, floor) ^ (int(index) * 0x9E3779B1)
+	h = h & 0x7FFFFFFF
+	h = (h ^ (h >> 16)) * 0x85EBCA6B
+	h = h & 0x7FFFFFFF
+	h = (h ^ (h >> 13)) * 0xC2B2AE35
+	h = h & 0x7FFFFFFF
+	h = h ^ (h >> 16)
+	return String(GameConstants.ROOM_THEME_IDS[h % GameConstants.ROOM_THEME_IDS.size()])
+
+# ==== R-155：按房间主题摆放家具 ====
+# 【三条硬约束（照搬箱子 R-79/R-94 的口径，不另起一套）】
+#   ① 只放**地面格**（grid==1）—— 墙格里摆家具 = 视觉穿模 + 碰撞体叠在墙上。
+#   ② **排除门格与主路径格** —— 门口摆货架会挡住玩家/bot 的通路（R-94 的教训）。
+#   ③ **排除箱子已占格**，并避开出生点/出口一小段 —— 两个实体抢一格会互相盖住。
+# ⚠ 家具的**碰撞行为完全由 `cat` 决定**（a/b/c/d），摆放这里只管"摆哪儿、摆什么"。
+func _place_furniture(rooms_g: Array, grid: PackedByteArray, cols: int, rows: int,
+		door_set: Dictionary, path_tiles: Dictionary, spawn: Vector2, exit_pos: Vector2,
+		crates: Array, seedv: int, floor_no: int) -> Array:
+	var out: Array = []
+	var occupied := {}
+	for c in crates:
+		var cv: Vector2 = c as Vector2
+		occupied[Vector2i(int(cv.x) / TILE, int(cv.y) / TILE)] = true
+	for ri in rooms_g.size():
+		var r: Rect2i = rooms_g[ri] as Rect2i
+		var theme: String = room_theme_of(seedv, floor_no, ri)
+		var furn: Array = ((GameConstants.ROOM_THEMES.get(theme, {}) as Dictionary).get("furn", [])) as Array
+		if furn.is_empty():
+			continue
+		# 房间内的候选格
+		var cand: Array[Vector2i] = []
+		for y in range(r.position.y, r.position.y + r.size.y):
+			for x in range(r.position.x, r.position.x + r.size.x):
+				if x < 0 or y < 0 or x >= cols or y >= rows:
+					continue
+				if grid[y * cols + x] != 1:
+					continue                       # ① 非地面
+				var t := Vector2i(x, y)
+				if door_set.has(t) or path_tiles.has(t) or occupied.has(t):
+					continue                       # ②③ 门格 / 主路径 / 已占
+				cand.append(t)
+		if cand.is_empty():
+			continue
+		# 数量按房间面积（小房间 1~2 件，大房间最多 6 件），且不超过候选数
+		var area: int = int(r.size.x) * int(r.size.y)
+		var want: int = clampi(int(area / 12), 1, 6)
+		want = mini(want, cand.size())
+		var used := {}
+		for k in want:
+			var h1: int = _mix(seedv, floor_no) ^ (int(ri * 131 + k) * 0x9E3779B1)
+			h1 = h1 & 0x7FFFFFFF
+			var cell: Vector2i = cand[h1 % cand.size()]
+			if used.has(cell):
+				continue
+			var p := _tile_center(cell)
+			# ③ 出生点 / 出口附近不放
+			if p.distance_to(spawn) < 40.0 or p.distance_to(exit_pos) < 40.0:
+				continue
+			used[cell] = true
+			occupied[cell] = true
+			var h2: int = _mix(seedv, floor_no) ^ (int(ri * 977 + k) * 0x85EBCA6B)
+			h2 = h2 & 0x7FFFFFFF
+			var fid: String = String(furn[h2 % furn.size()])
+			out.append({
+				"id": fid,
+				"cat": GameConstants.furniture_cat(fid),
+				"pos": p,
+				"cell": cell,
+				"room": ri,
+				"theme": theme,
+			})
+	# ---- 可达性守卫（照箱子 `cguard` 同款口径）----
+	# a 类家具等同墙、c 类等同箱子 —— 在小房间里摆几件**真的能把房间封死**
+	#   （首跑实测：103 房 / 438 件家具 → 2 个房间不可达）。
+	#   所以摆完之后必须复查：若有房间走不到，就删掉"离该房间中心最近的挡路家具"再复查，
+	#   直到全部可达。**宁可少摆几件，也不能让房间的 loot 白生成。**
+	return _furniture_reach_guard(out, grid, cols, rows, rooms_g, spawn)
+
+# 从出生格 BFS 出可达集合（grid 值 1 = 可走）
+func _reach_set(grid: PackedByteArray, cols: int, rows: int, from: Vector2i) -> Dictionary:
+	var seen: Dictionary = {}
+	if from.x < 0 or from.y < 0 or from.x >= cols or from.y >= rows:
+		return seen
+	if grid[from.y * cols + from.x] != 1:
+		return seen
+	var q: Array = [from]
+	seen[from] = true
+	var head: int = 0
+	while head < q.size():
+		var cur: Vector2i = q[head] as Vector2i
+		head += 1
+		for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var nx: Vector2i = cur + (d as Vector2i)
+			if nx.x < 0 or nx.y < 0 or nx.x >= cols or nx.y >= rows:
+				continue
+			if grid[nx.y * cols + nx.x] != 1 or seen.has(nx):
+				continue
+			seen[nx] = true
+			q.append(nx)
+	return seen
+
+# 家具可达性守卫：反复删除挡路家具，直到所有房间都可达（或删无可删）。
+func _furniture_reach_guard(furn: Array, base_grid: PackedByteArray, cols: int, rows: int,
+		rooms_g: Array, spawn: Vector2) -> Array:
+	var spawn_t := Vector2i(int(spawn.x) / TILE, int(spawn.y) / TILE)
+	var guard: int = 0
+	while guard < 400:
+		guard += 1
+		var g: PackedByteArray = base_grid.duplicate()
+		for fd in furn:
+			var fdict: Dictionary = fd as Dictionary
+			if String(fdict.get("cat", "")) == "d":
+				continue
+			var c: Vector2i = fdict.get("cell", Vector2i.ZERO) as Vector2i
+			if c.x >= 0 and c.y >= 0 and c.x < cols and c.y < rows:
+				g[c.y * cols + c.x] = 0
+		var reach := _reach_set(g, cols, rows, spawn_t)
+		# 找第一个走不到的房间
+		var bad_room: int = -1
+		for ri in rooms_g.size():
+			var r: Rect2i = rooms_g[ri] as Rect2i
+			var cx: int = int(r.position.x + r.size.x * 0.5)
+			var cy: int = int(r.position.y + r.size.y * 0.5)
+			if not reach.has(Vector2i(cx, cy)):
+				bad_room = ri
+				break
+		if bad_room < 0:
+			break                                   # 全部可达，收工
+		# 删掉"离该房间中心最近"的挡路家具（可能是堵在门口/走廊的那件）
+		var rr: Rect2i = rooms_g[bad_room] as Rect2i
+		var target := Vector2(int(rr.position.x + rr.size.x * 0.5), int(rr.position.y + rr.size.y * 0.5))
+		var worst: int = -1
+		var worst_d: float = 1e18
+		for i in furn.size():
+			var fdict: Dictionary = furn[i] as Dictionary
+			if String(fdict.get("cat", "")) == "d":
+				continue
+			var c: Vector2i = fdict.get("cell", Vector2i.ZERO) as Vector2i
+			var dd: float = Vector2(c.x, c.y).distance_to(target)
+			if dd < worst_d:
+				worst_d = dd
+				worst = i
+		if worst < 0:
+			break                                   # 没有挡路家具可删（不该发生）
+		furn.remove_at(worst)
+	return furn

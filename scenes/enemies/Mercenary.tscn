@@ -15,7 +15,7 @@ size = Vector2(10, 10)
 ;   依赖 layer，不依赖本 mask。
 [node name="Mercenary" type="CharacterBody2D"]
 collision_layer = 8
-collision_mask = 19
+collision_mask = 51   ; R-155: 19(墙1+玩家2+家具16) +32 = b类家具(防弹玻璃)也挡敌人
 script = ExtResource("1_merc")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="."]

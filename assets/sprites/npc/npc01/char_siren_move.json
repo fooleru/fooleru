@@ -1,0 +1,29 @@
+{
+  "file": "char_siren_move.png",
+  "frame_w": 64,
+  "frame_h": 64,
+  "cols": 6,
+  "rows": 4,
+  "fps": 10,
+  "row_order": [
+    "up",
+    "right",
+    "down",
+    "left"
+  ],
+  "row_label": {
+    "up": "背(上)",
+    "right": "右",
+    "down": "正(下)",
+    "left": "左(镜像)"
+  },
+  "mirror_of": {
+    "left": "right"
+  },
+  "note": "行0=背(上) 行1=右 行2=正(下) 行3=左。左方向由右方向水平镜像生成——本地 Q4 模型无法稳定产出俯视中间角度，镜像保证朝向正确。6帧循环=接触/过渡L/跨步/接触/过渡R/跨步。",
+  "seed_per_row": {
+    "up": 8805,
+    "down": 8810,
+    "right": 8812
+  }
+}

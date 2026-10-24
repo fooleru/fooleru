@@ -35,11 +35,19 @@ func refresh(fog) -> void:
 	for y in rows:
 		for x in cols:
 			var st: int = int(tiles[y * cols + x])
-			var c := Color(0.0, 0.0, 0.0, 0.0)
+			var a: float = 0.0
 			if st == GameConstants.FOG_UNEXPLORED:
-				c = Color(0.0, 0.0, 0.0, 1.0)                                        # 未探索：全黑（不透明、无信息）
+				a = 1.0                                                                # 未探索：全黑（不透明、无信息）
 			elif st == GameConstants.FOG_EXPLORED:
-				c = Color(0.0, 0.0, 0.0, GameConstants.FOG_EXPLORED_DIM_ALPHA)        # 已探索：压暗（保色相）
+				a = GameConstants.FOG_EXPLORED_DIM_ALPHA                               # 已探索：压暗（保色相）
+			# ==== R-new（2026-10-22）：视野边缘软过渡 ====
+			# 取 min(持久alpha, 过渡环渐变量)：可见圈(0) → 过渡环(0.18/0.37) → 已探索(0.55)
+			#   ⇒ 半径扩大后圈外不再有"全亮直接跳黑"的硬边，亮度连续衔接。
+			#   LOS 门控在 FogGrid.edge_fade 内部（墙后不亮）。
+			var edge: float = fog.edge_fade(Vector2i(x, y))
+			if edge > 0.0:
+				a = minf(a, edge)
+			var c := Color(0.0, 0.0, 0.0, a)
 			_img.set_pixel(x, y, c)
 	# headless（无渲染）下不建 GPU 贴图，避免报错；像素断言走 CPU 侧 _img
 	if DisplayServer.get_name() != "headless":

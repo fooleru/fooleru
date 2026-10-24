@@ -44,6 +44,7 @@ var _origin: Vector2 = Vector2.ZERO
 var _exit: Vector2 = Vector2.ZERO
 var _player: Node2D = null
 var _tile: float = 16.0
+var _floor_no: int = 0            # R-new（2026-10-21）：层号（标题用；0 = 未设置）
 var _fog = null                  # FogGrid 实例（preload，无 class_name → 不标注类型）
 # R-110：宝箱定位标记（世界坐标 + 闪烁相位）。
 # 与 TraceArrows 共用**同一份数组**（Main 把同一个 Array 推给两个节点）
@@ -64,7 +65,9 @@ var _enemy_dots: Array = []
 var _crate_marks: Array = []
 
 # 由 Main 在每层生成后调用（fog = 与主视角世界共用的 FogGrid）
-func set_floor(grid: PackedByteArray, cols: int, rows: int, exit_pos: Vector2, player_ref: Node2D, tile: float, fog = null) -> void:
+func set_floor(grid: PackedByteArray, cols: int, rows: int, exit_pos: Vector2, player_ref: Node2D, tile: float, fog = null, floor_no: int = 0) -> void:
+	# ⚠ R-new（2026-10-21）：末尾新增 floor_no（带默认值，旧调用点不破）→ 标题显示层号。
+	_floor_no = floor_no
 	_grid = grid
 	_cols = cols
 	_rows = rows
@@ -168,7 +171,12 @@ func _bake() -> void:
 	if DisplayServer.get_name() != "headless":
 		_tex = ImageTexture.create_from_image(img)
 	var map_size := Vector2(_cols * CELL, _rows * CELL)
-	_origin = ((get_viewport_rect().size - map_size) * 0.5).floor()
+	# ⚠⚠ R-new（2026-10-21）：按**设计空间**居中，不是真实视口 ——
+	#   本节点被 Main._apply_ui_scale 放大 UI_SCALE 倍（实际 640×360），
+	#   而 `_origin` 是**节点局部坐标**（会被一起放大）→ 用真实视口算会偏出屏幕。
+	#   真实视口 / UI_SCALE 才是本节点的局部空间 → 用 DESIGN_W/H 显式表达。
+	var design_size := Vector2(GameConstants.DESIGN_W, GameConstants.DESIGN_H)
+	_origin = ((design_size - map_size) * 0.5).floor()
 	queue_redraw()
 
 # 供 headless 验证：地图以 tile 计的尺寸
@@ -202,6 +210,15 @@ func _draw() -> void:
 	else:
 		draw_rect(Rect2(_origin, map_size), FLOOR_COLOR)
 	draw_rect(Rect2(_origin, map_size), BORDER_COLOR, false, 1.0)
+	# ⚠⚠ R-new（2026-10-21）：**层号标题 + 关闭提示** —— 大地图此前**零文字**，
+	#   玩家不知道自己在第几层、也不知道怎么关。画在地图内左上角（不被边框压住）。
+	if _floor_no > 0:
+		var font := GameConstants.ui_font()
+		var title: String = "第 %d 层" % _floor_no
+		draw_string(font, _origin + Vector2(6.0, 14.0), title, HORIZONTAL_ALIGNMENT_LEFT,
+			map_size.x - 12.0, 10, TITLE_COLOR)
+		draw_string(font, _origin + Vector2(6.0, 26.0), Loc.t("map.close_hint"),
+			HORIZONTAL_ALIGNMENT_LEFT, map_size.x - 12.0, 8, Color(0.70, 0.78, 0.88, 1.0))
 	# 出口（仅当其所在格非「未探索」时绘制；持久标记语义：仅坐标、不透视地形/敌人）
 	# ⚠ **R-124 语义说明（不改行为）**：用户拍板「第 100 层**不应该有出口标记**，
 	#   统一成**出发点**，用黄方块表示，并且位置也设定在**现在黄方块处**」。

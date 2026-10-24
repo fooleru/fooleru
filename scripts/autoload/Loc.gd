@@ -76,15 +76,32 @@ const T_ZH_CN: Dictionary = {
 	#   （R-107 建立的单一真相源，见 `--verify-cratetype` ⓪），前缀才归Loc 管。
 	"hint.crate_open_prefix": "按 F 打开",
 	"hint.crate_open_generic": "按 F 打开箱子",
+	# ---- 交互提示：靠近敌人尸体（R-new 尸体系统）----
+	# ⚠ 与箱子文案刻意**不同词**：「打开」是箱子、「搜索」是尸体 —— 玩家靠近时
+	#   一眼能分清"这是场景家具还是敌人掉落"，不靠颜色猜。
+	"hint.corpse_search": "按 F 搜索尸体",
 	# ---- 瞬时提示：V 键「全地图箱子都开过」 ----
 	# ⚠ 用户拍板时长 1.5s（`TRACE_REJECT_TOAST_SECONDS`），本条**只管文案不管时长**。
 	"toast.crates_all_opened": "全部箱子已打开",
 	# ---- 第 100 层出发（🔴 R-128：`depart.label` 已删，见文件头「世界空间禁止文字」铁律）----
-	"depart.prompt": "按 F 进入下一层",
-	# ---- R-119 出发确认框 ----
-	"depart.confirm.title": "出发确认",
-	"depart.confirm.body": "是否离开基地，前往下一层？",
-	"depart.confirm.keys": "F 确认    Esc 取消",
+	# R-new（2026-10-18）：F 从「确认下楼」改为「打开楼层选择面板」→ 文案同步。
+	"depart.prompt_select": "按 F 选择楼层",
+	# ---- R-new（2026-10-22）：战斗层出发点电梯门口提示 ----
+	# ⚠ 补登漏填：Main._update_hint 自 R-new 起就调 Loc.t("elevator.prompt")，但表里一直没有 →
+	#   按 Loc 回退机制会显示原始键名 "elevator.prompt"。本次补「按 F 返回基地」。
+	"elevator.prompt": "按 F 返回基地",
+	# ---- R-new（2026-10-22）：基地双人床旁提示（睡觉回血 / 按比例扣饥渴）----
+	"bed.prompt": "按 F 休息恢复",
+	# ---- R-new（2026-10-22）：基地 NPC1 旁提示（按 F 开对话）----
+	"npc.prompt": "按 F 交谈",
+	# ---- R-new 楼层选择面板（FloorSelect.gd；取代 R-119 的 depart.confirm.*）----
+	"depart.select.title": "选择楼层",
+	"depart.select.row": "%dF",
+	"depart.select.unexplored": "（未探索）",
+	"depart.select.empty": "暂无已探索的楼层",
+	"depart.select.keys": "W/S 上下    A/D 左右    F 前往    Esc 取消",
+	# ---- R-new（2026-10-21）：M 大地图的层号标题下的关闭提示 ----
+	"map.close_hint": "M / Esc 关闭",
 	# ---- 返回按钮 / HUD 楼层号：**刻意保留 ASCII**，见文件头「保留 ASCII」段 ----
 	"return.floor_label": "F100",
 	"hud.floor_prefix": "F",

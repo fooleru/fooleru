@@ -134,7 +134,13 @@ func hit_rect_local() -> Rect2:
 ##   `qa_scratch/r112/click_probe.txt`），而本工程所有既有点击也都在
 ##   `Main._input` 里自己做命中测试。两条路并存、判定函数共用本方法。
 func hit_test(p: Vector2) -> bool:
-	return hit_rect().has_point(p)
+	# ⚠⚠ R-new（2026-10-19 640×360 实装）：p 是**视口坐标**（640×360 空间），而
+	#   `hit_rect()` 是**缩放前的绝对屏幕坐标**（320×180 空间，控件原点 = hit_rect.position）。
+	#   控件 scale=2 后两者差 2 倍 → 经自身 canvas 变换逆转到局部后，
+	#   **必须加回控件原点**才是缩放前的绝对坐标（与 hit_rect 同系）。
+	#   漏加原点 = 偏移 (286,154) → 永远打不中（实测 ⑥/⑪-b FAIL 的根因）。
+	var local: Vector2 = get_global_transform_with_canvas().affine_inverse() * p
+	return hit_rect().has_point(local + hit_rect().position)
 
 ## 屏幕可见区（320×180 内部分辨率）
 func view_rect() -> Rect2:

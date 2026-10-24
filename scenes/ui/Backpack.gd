@@ -48,6 +48,12 @@ const SORT_BTN_X := PANEL_LX + PANEL_W - PAD - SORT_BTN_W   # 右对齐到左栏
 const SORT_BTN_Y := PANEL_Y + 2.0
 func sort_button_rect() -> Rect2:
 	return Rect2(SORT_BTN_X, SORT_BTN_Y, SORT_BTN_W, SORT_BTN_H)
+
+# R-new（2026-10-22 用户需求）：箱子（右栏）排序按钮 —— 与左栏同款，画在**右栏标题行右端**。
+const CONT_SORT_BTN_X := PANEL_RX + PANEL_W - PAD - SORT_BTN_W   # 右对齐到右栏面板内
+const CONT_SORT_BTN_Y := PANEL_Y + 2.0
+func cont_sort_button_rect() -> Rect2:
+	return Rect2(CONT_SORT_BTN_X, CONT_SORT_BTN_Y, SORT_BTN_W, SORT_BTN_H)
 const GRID_Y := PANEL_Y + HEADER_H             # 15（左栏纵向起点基准；右栏**不再**用它）
 const GRID_LX := PANEL_LX + (PANEL_W - GRID_W) * 0.5   # 20（120 在 156 内居中）
 const GRID_RX := PANEL_RX + (PANEL_W - CONT_W) * 0.5   # 180
@@ -463,17 +469,16 @@ func _draw() -> void:
 	# 右栏：箱子（⚠ R-101：位置/行数**刻意保持旧值**，不受左栏改动影响）
 	if container_open:
 		_draw_panel(PANEL_RX, "箱子（%d 件）" % container_items.size())
+		_draw_sort_button_at(cont_sort_button_rect())   # R-new（2026-10-22）：右栏排序按钮
 		# ⚠ R-111：用**右栏专属**的 `CONT_GRID_Y`（= 向上靠，紧贴标题行），不再借用左栏 `GRID_Y`。
 		_draw_grid(GRID_RX, CONT_GRID_Y, container_items, CONT_ROWS)
 	# 拖拽中的物品（跟随鼠标，按物品真实占格大小画）
+	#   ⚠ R-154：同样走 `draw_item` —— 否则拖动时图标"变回色块"，
+	#   同一件物品在"静置/拖拽"两种状态下出现两种外观（观感割裂）。
 	if not drag_item.is_empty():
 		var dw: float = item_w(drag_item) * SLOT
 		var dh: float = item_h(drag_item) * SLOT
-		var dc: Color = Color(0.7, 0.7, 0.7)
-		if drag_item.has("color"):
-			dc = drag_item["color"]
-		draw_rect(Rect2(drag_pos.x - dw * 0.5, drag_pos.y - dh * 0.5, dw, dh), dc)
-		draw_rect(Rect2(drag_pos.x - dw * 0.5, drag_pos.y - dh * 0.5, dw, dh), ITEM_LINE, false, 1.0)
+		draw_item(Rect2(drag_pos.x - dw * 0.5, drag_pos.y - dh * 0.5, dw, dh), drag_item)
 	# ---- 悬停提示框（鼠标附近）：第 1 行物品名 + 第 2 行简要说明 ----
 	# ⚠ R-111：R-67 只有一行（名字）。用户要求加"简要说明"，故框高 14 → 22px。
 	# ⚠ **宽度取两行的较大值**：说明行通常比名字长（「回血 40 · 饥饿 35 ...」），
@@ -500,7 +505,10 @@ func _draw() -> void:
 # ==== R-new：排序按钮绘制 ====
 # 标题行右端的「排序」小按钮：底板 + 描边 + 文字（走 Loc 表，与全工程 UI 文案一致）。
 func _draw_sort_button() -> void:
-	var r: Rect2 = sort_button_rect()
+	_draw_sort_button_at(sort_button_rect())
+
+# 在给定矩形画「排序」按钮（左/右栏共用同一外观）。
+func _draw_sort_button_at(r: Rect2) -> void:
 	draw_rect(r, SLOT_BG)
 	draw_rect(r, GEAR_SLOT_LINE, false, 1.0)
 	draw_string(GameConstants.ui_font(), Vector2(r.position.x + 2.0, r.position.y + 7.0),
@@ -513,6 +521,68 @@ func _draw_panel(px: float, title: String) -> void:
 	draw_rect(Rect2(px, PANEL_Y, PANEL_W, PANEL_H), BORDER, false, 1.0)
 	draw_string(GameConstants.ui_font(), Vector2(px + PAD, PANEL_Y + 10.0), title,
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 8, TEXT)
+
+# ==== R-154：物品图标实装（把已生成的 64×64 图标接进背包/装备栏）====
+# ⚠⚠ **为什么资产是 10×10 而不是交付时的 64×64**：背包格 = `GameConstants.INV_SLOT`
+#   = **10px**（12×8 格，R-111）。把 64×64 直接交给引擎缩到 10px = 6.4:1，
+#   Nearest 下必然aliasing 成糊块（与 R-153 僵尸「画布 64×64 ≠ 世界占位」同一个坑）。
+#   → **离线预降采样到 10×10**（box 滤波 + alpha 硬阈值 + 颜色吸附回原图调色板，
+#     见 `outputs/item_icons/downscale_for_engine.py`），引擎 **零缩放 1:1** 绘制。
+#   ⇒ 图标可读性上限就是 10px，这是**当前格距的物理上限**，不是画工问题。
+#   将来若要更清楚的图标，只能**放大格距**（动 `INV_SLOT`，属布局批次），不能靠引擎硬缩。
+#   ⚠ key 必须与 `GameConstants.ITEM_TYPES[].id` **逐字一致**；查不到 → 回落色块（不崩）。
+#   ⚠ **未实装图标的物品仍画原色块**（可见地暴露"还没画"），而不是画成空白 ——
+#     与 R-148 敌人精灵「纹理缺失 → 可见地降级回色块」同一取舍。
+const ITEM_ICON_TEX := {
+	"medkit": preload("res://assets/sprites/ui_icon_med_medkit.png"),
+	# ⚠ `bandage` 图标已生成（`ui_icon_med_bandage.png`），但**游戏里还没有 `bandage` 这个物品**
+	#   （`ITEM_TYPES` 首个药品是 `medkit` 医疗包）→ 无处可挂，暂不登记。
+	#   将来加了绷带物品，这里加一行即可（资产已就位）。
+}
+
+# 物品图标（纯函数，便于 `--verify-itemicon` 直接断言，不依赖鼠标悬停位置）。
+#   ⚠ 走 `get("id")` 而非 `it["id"]`：物品字典是原型拷贝，缺 `id` 时不崩。
+func item_icon(it: Dictionary) -> Texture2D:
+	if it.is_empty():
+		return null
+	var id: String = String(it.get("id", ""))
+	if id == "":
+		return null
+	return ITEM_ICON_TEX.get(id, null) as Texture2D
+
+# 已登记图标的物品 id 列表（**纯函数**，供 `--verify-itemicon` ④ 断言
+#   「每个 key 都能在 `GameConstants.ITEM_TYPES` 里找到真实物品」——
+#   否则就会写下 `bandage` 这种**游戏里根本没有的物品**的 key，图永远挂不上）。
+func item_icon_ids() -> Array:
+	return ITEM_ICON_TEX.keys()
+
+# 物品在槽内的绘制矩形（**满格**，1:1 对齐 `INV_SLOT`，故 1×1 物品恰好 10×10 = 图标尺寸）。
+#   ⚠ 旧实现在满格基础上 **内缩 1px** 画色块（`grow(-1)`），那是为了给边框留视觉间隙。
+#   实装图标后**不再内缩**：图标本身就是满格内容，再内缩就只剩 8×8 可画 → 白白丢 20% 像素。
+#   边框改画在满格边界（见 `draw_item`）。
+func item_cell_rect(ox: float, oy: float, it: Dictionary) -> Rect2:
+	#   ⚠ 用 `get("gx", 0)` 而非 `it["gx"]`：物品原型（`GameConstants.ITEM_TYPES` 拷贝）
+	#     **尚未放进背包**、没有 gx/gy 坐标 —— 直接下标会崩（验证入口正是拿原型来试尺寸的）。
+	return Rect2(ox + int(it.get("gx", 0)) * SLOT, oy + int(it.get("gy", 0)) * SLOT,
+		item_w(it) * SLOT, item_h(it) * SLOT)
+
+# 统一的物品绘制入口（网格栏 + 装备栏**共用**，避免两条路径画出两种外观）。
+#   ① 有图标 → `draw_texture_rect` 1:1（零缩放，保住硬像素）
+#   ② 无图标 → 回落 `color` 色块（可见地降级）
+#   ③ 占格 ≥4 的多格大件再画一条内框（沿用旧口径，不画网格线避免割裂图标）
+#   ⚠「图标与色块同时可见」= 双重外观，**禁止**（与 R-148 敌人精灵同一铁律）。
+func draw_item(cell: Rect2, it: Dictionary) -> void:
+	var tex := item_icon(it)
+	if tex != null:
+		draw_texture_rect(tex, cell, false)          # 1:1，不缩放
+	else:
+		var c: Color = Color(0.75, 0.75, 0.80)
+		if it.has("color"):
+			c = it["color"]
+		draw_rect(cell, c)
+	draw_rect(cell, ITEM_LINE, false, 1.0)
+	if item_slots(it) >= 4:
+		draw_rect(cell.grow(-2.0), ITEM_LINE, false, 1.0)
 
 # 装备栏：**两行两列**（行1 = 武器1 + 护甲，行2 = 武器2 + 背包），画在背包网格上方
 # ⚠⚠ **R-111：标签从「槽上方」改为「槽左侧」**（两行布局下的必然要求）：
@@ -537,7 +607,7 @@ func _draw_gear(font: Font) -> void:
 			var cy: float = r.position.y + r.size.y * 0.5
 			draw_line(Vector2(cx - 4.0, cy), Vector2(cx + 4.0, cy), GEAR_SLOT_LINE, 1.0)
 		else:
-			# 物品按**真实占格尺寸**在槽内**居中**绘制
+			# R-154：统一走 `draw_item`（装备栏里的消耗品也用真图标；武器无图标 → 回落色块）
 			# ⚠ 为什么不用 `inv_item_rect`：装备栏没有 gx/gy（不是网格容器），
 			#   尺寸必须由 `w`/`h` 直接算，再相对槽中心居中。
 			# ⚠ R-111 **沿用 R-71 的居中画法**（用户未要求改）：武器槽是 5×3 的**上界**，
@@ -548,13 +618,7 @@ func _draw_gear(font: Font) -> void:
 			var ir: Rect2 = Rect2(
 				r.position.x + (r.size.x - iw) * 0.5,
 				r.position.y + (r.size.y - ih) * 0.5, iw, ih)
-			var c: Color = Color(0.75, 0.75, 0.80)
-			if it.has("color"):
-				c = it["color"]
-			draw_rect(ir, c)
-			draw_rect(ir, ITEM_LINE, false, 1.0)
-			if item_slots(it) >= 4:
-				draw_rect(ir.grow(-2.0), ITEM_LINE, false, 1.0)
+			draw_item(ir, it)
 		# 标签：画在槽的**左侧**、与槽**顶对齐**（字号 7 = 320×180 上唯一放得下的字号）
 		var lb: String = _gear_label(i)
 		var lx: float = r.position.x - GEAR_GAP - (GEAR_LBL_W if _is_weapon_slot(i) else GEAR_MINOR_LBL_W)
@@ -596,13 +660,5 @@ func _draw_grid(ox: float, oy: float, list: Array, rows: int = -1) -> void:
 	for it in list:
 		if not it.has("gx") or not it.has("gy"):
 			continue
-		var c: Color = Color(0.75, 0.75, 0.80)
-		if it.has("color"):
-			c = it["color"]
-		var r := Rect2(ox + int(it["gx"]) * SLOT + 1.0, oy + int(it["gy"]) * SLOT + 1.0,
-			item_w(it) * SLOT - 2.0, item_h(it) * SLOT - 2.0)
-		draw_rect(r, c)
-		draw_rect(r, ITEM_LINE, false, 1.0)
-		# 占格 ≥4 的物品再画一条内框，让"这是多格大件"一眼可读（不画网格线，避免割裂图标）
-		if item_slots(it) >= 4:
-			draw_rect(r.grow(-2.0), ITEM_LINE, false, 1.0)
+		# R-154：统一走 `draw_item`（有图标画图标 1:1 / 无图标回落色块 + 边框）
+		draw_item(item_cell_rect(ox, oy, it), it)

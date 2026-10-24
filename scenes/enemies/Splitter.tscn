@@ -3,7 +3,8 @@
 [ext_resource type="Script" path="res://scenes/enemies/Splitter.gd" id="1_splitter"]
 
 [sub_resource type="RectangleShape2D" id="rect_s"]
-size = Vector2(24, 24)
+; R-new：Boss 比杂兵大 4 倍(面积)=线性×2（碰撞盒 24→36，相对放大后的 18 杂兵）
+size = Vector2(36, 36)
 
 ; ==== R-149 · Boss 敌人「分裂怪」====
 ; 【与 Zombie.tscn 的差异 —— 只有三处】
